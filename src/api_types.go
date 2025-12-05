@@ -109,27 +109,26 @@ type Person struct {
 }
 
 type ParliamentaryGroup struct {
-	ID        int    `db:"id" json:"id,omitempty"`
-	Name      string `db:"name" json:"name,omitempty"`
-	ShortName string `db:"short_name" json:"short_name,omitempty"`
+	ID        int            `db:"id" json:"id,omitempty"`
+	Name      sql.NullString `db:"name" json:"name,omitempty"`
+	ShortName sql.NullString `db:"short_name" json:"short_name,omitempty"`
 }
 
 type Role struct {
-	ID             int    `db:"id" json:"id,omitempty"`
-	RoleName       string `db:"name" json:"name,omitempty"`
-	AcademicTitle  string `db:"academic_title" json:"academic_title,omitempty"`
-	LastName       string `db:"last_name" json:"last_name,omitempty"`
-	FirstName      string `db:"first_name" json:"first_name,omitempty"`
-	PersonID       int    `db:"person_id" json:"person_id,omitempty"`
-	GroupID        int    `db:"group_id" json:"group_id,omitempty"`
-	ElectionPeriod int    `db:"election_period" json:"election_period,omitempty"`
+	ID             int            `db:"id" json:"id,omitempty"`
+	RoleName       sql.NullString `db:"name" json:"name,omitempty"`
+	AcademicTitle  sql.NullString `db:"academic_title" json:"academic_title,omitempty"`
+	LastName       string         `db:"last_name" json:"last_name,omitempty"`
+	FirstName      string         `db:"first_name" json:"first_name,omitempty"`
+	PersonID       int            `db:"person_id" json:"person_id,omitempty"`
+	GroupID        sql.NullInt64  `db:"group_id" json:"group_id,omitempty"`
+	ElectionPeriod sql.NullInt64  `db:"election_period" json:"election_period,omitempty"`
 }
 
 type ElectionPeriod struct {
-	ID        int       `db:"id" json:"id,omitempty"`
-	Number    int       `db:"number" json:"number"`
-	StartDate time.Time `db:"start_date" json:"start_date,omitempty"`
-	EndDate   time.Time `db:"end_date" json:"end_date,omitempty"`
+	Number    int          `db:"number" json:"number"`
+	StartDate sql.NullTime `db:"start_date" json:"start_date,omitempty"`
+	EndDate   sql.NullTime `db:"end_date" json:"end_date,omitempty"`
 }
 
 type IngestionStatus string
@@ -144,6 +143,23 @@ type IngestionLog struct {
 	Timestamp    time.Time       `db:"timestamp" json:"timestamp,omitempty"`
 	Status       IngestionStatus `db:"status" json:"status,omitempty"`
 	ErrorMessage sql.NullString  `db:"error_message" json:"error_message,omitempty"`
+}
+
+type LogStatus string
+
+const (
+	Debug LogStatus = "debug"
+	Info  LogStatus = "info"
+	Warn  LogStatus = "warn"
+	Error LogStatus = "error"
+	Fatal LogStatus = "fatal"
+)
+
+type Log struct {
+	ID        int       `db:"id" json:"id,omitempty"`
+	Timestamp time.Time `db:"timestamp" json:"timestamp,omitempty"`
+	Status    LogStatus `db:"status" json:"status,omitempty"`
+	Message   string    `db:"message" json:"message,omitempty"`
 }
 
 // TODO: Split protocol parts

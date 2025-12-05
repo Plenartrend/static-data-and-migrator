@@ -4,11 +4,13 @@
 DROP SCHEMA IF EXISTS plenartrend CASCADE;
 CREATE SCHEMA plenartrend;
 SET SCHEMA 'plenartrend';
+SET SEARCH_PATH TO plenartrend;
 
 -- Enum types
 CREATE TYPE document_type AS ENUM ('protocol', 'printedPaper');
 CREATE TYPE body AS ENUM ('BT', 'BR', 'BV', 'EK');
 CREATE TYPE ingestion_status AS ENUM ('success', 'failed');
+CREATE TYPE log_status AS ENUM ('debug', 'info', 'warn', 'error', 'fatal');
 
 -- Topics table
 CREATE TABLE topics (
@@ -19,14 +21,15 @@ CREATE TABLE topics (
 -- Parliamentary groups (Fraktionen)
 CREATE TABLE parliamentary_groups (
     id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL,
-    short_name TEXT NOT NULL
+    name TEXT,
+    short_name TEXT,
+    CONSTRAINT name_or_short_name_check CHECK (name IS NOT NULL OR short_name IS NOT NULL)
 );
 
 -- Election periods (Wahlperioden)
 CREATE TABLE election_periods (
     number INTEGER PRIMARY KEY,
-    start_date TIMESTAMP NOT NULL,
+    start_date TIMESTAMP,
     end_date TIMESTAMP
 );
 
@@ -37,14 +40,15 @@ CREATE TABLE persons (
 
 -- Roles (connecting persons to parliamentary groups and election periods)
 CREATE TABLE roles (
-    id SERIAL PRIMARY KEY,
-    name TEXT,
-    academic_title TEXT,
-    last_name TEXT NOT NULL,
-    first_name TEXT NOT NULL,
-    person_id INTEGER NOT NULL REFERENCES persons(id),
-    group_id INTEGER REFERENCES parliamentary_groups(id),
-    election_period INTEGER REFERENCES election_periods(number)
+   id SERIAL PRIMARY KEY,
+   name TEXT,
+   academic_title TEXT,
+   last_name TEXT NOT NULL,
+   first_name TEXT NOT NULL,
+   person_id INTEGER NOT NULL REFERENCES persons(id),
+   group_id INTEGER REFERENCES parliamentary_groups(id),
+   election_period INTEGER REFERENCES election_periods(number),
+   UNIQUE (person_id, election_period, name) --Thus so far we cannot read changes of Fraktion within one period, as they have this same combination. But we need to check it, as some roles may appear double in the API.
 );
 
 -- Processes (Vorgänge)
@@ -142,5 +146,12 @@ CREATE TABLE ingestion_logs (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMP NOT NULL,
     status ingestion_status NOT NULL,
-    error_message TEXT NOT NULL
+    error_message TEXT
+);
+
+CREATE TABLE logs (
+    id SERIAL PRIMARY KEY,
+    timestamp TIMESTAMP NOT NULL,
+    status log_status NOT NULL,
+    message TEXT NOT NULL
 );

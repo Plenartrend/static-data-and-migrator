@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
@@ -17,7 +18,7 @@ func main() {
 		log.Fatal("Error loading .env file")
 	}
 
-	db, err := sqlx.Connect("postgres", "host=postgres user=Postgres password=Postgres dbname=Plenartrend sslmode=disable") // TODO: Use environment variables
+	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
@@ -40,7 +41,12 @@ func main() {
 	})
 
 	http.HandleFunc("/ingest", func(w http.ResponseWriter, r *http.Request) {
-		ingestData()
+		reinitializeApiData := r.URL.Query().Get("reinitializeApiData") == "true"
+		if reinitializeApiData {
+			ingestData(true)
+		} else {
+			ingestData(false)
+		}
 	})
 
 	log.Println("Server starting on :8080")

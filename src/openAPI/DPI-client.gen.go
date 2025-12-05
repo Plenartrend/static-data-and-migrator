@@ -585,22 +585,20 @@ type Person struct {
 
 	// Basisdatum Datum des ersten zugehörigen Dokuments
 	Basisdatum *openapi_types.Date `json:"basisdatum,omitempty"`
-
-	// Bundesland Das Bundesland wird bei persönlichen Urhebern verwendet, die Mitglieder des Bundesrates sind, z. B. „Reinhold Hilbers, MdBR (Finanzminister), Niedersachsen“
-	Bundesland *Bundesland `json:"bundesland,omitempty"`
+	Bundesland *[]Bundesland       `json:"bundesland,omitempty"`
 
 	// Datum Datum des letzten zugehörigen Dokuments
 	Datum           *openapi_types.Date `json:"datum,omitempty"`
-	Fraktion        *string             `json:"fraktion,omitempty"`
-	Funktion        string              `json:"funktion"`
-	Funktionszusatz *string             `json:"funktionszusatz,omitempty"`
+	Fraktion        *[]string           `json:"fraktion,omitempty"`
+	Funktion        []string            `json:"funktion"`
+	Funktionszusatz *[]string           `json:"funktionszusatz,omitempty"`
 	Id              string              `json:"id"`
 	Nachname        string              `json:"nachname"`
 	Namenszusatz    *string             `json:"namenszusatz,omitempty"`
 
 	// PersonRoles Nebeneinträge mit bspw. abweichenden Funktionen oder Namensänderungen
 	PersonRoles     *[]PersonRole `json:"person_roles,omitempty"`
-	Ressort         *string       `json:"ressort,omitempty"`
+	Ressort         *[]string     `json:"ressort,omitempty"`
 	Titel           string        `json:"titel"`
 	Typ             string        `json:"typ"`
 	Vorname         string        `json:"vorname"`
