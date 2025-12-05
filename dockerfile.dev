@@ -10,9 +10,9 @@ RUN go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest
 
 # Copy source so go mod tidy can detect imports (volume overwrites at runtime)
 COPY src/ ./src/
-RUN go mod init plenartrend/static-data-and-migrator && go mod tidy && go mod download
+RUN go mod init plenartrend/static-data-and-migrator && go mod tidy
 
-# RUN go generate ./src/openAPI/generate.go run manually
+# RUN go generate ./src/openAPI/generate.go #run manually
 
 EXPOSE 8080
 

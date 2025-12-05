@@ -8,6 +8,7 @@ SET SCHEMA 'plenartrend';
 -- Enum types
 CREATE TYPE document_type AS ENUM ('protocol', 'printedPaper');
 CREATE TYPE body AS ENUM ('BT', 'BR', 'BV', 'EK');
+CREATE TYPE ingestion_status AS ENUM ('success', 'failed');
 
 -- Topics table
 CREATE TABLE topics (
@@ -135,4 +136,11 @@ CREATE TABLE activities (
         (document_type = 'printedPaper' AND printed_paper_id IS NOT NULL AND protocol_id IS NULL) OR
         (document_type = 'protocol' AND protocol_id IS NOT NULL AND printed_paper_id IS NULL)
     )
+);
+
+CREATE TABLE ingestion_logs (
+    id SERIAL PRIMARY KEY,
+    timestamp TIMESTAMP NOT NULL,
+    status ingestion_status NOT NULL,
+    error_message TEXT NOT NULL
 );

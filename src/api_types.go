@@ -8,7 +8,7 @@ import (
 type DocumentType string
 
 const (
-	DocumentProtocol DocumentType = "protocol"
+	DocumentProtocol     DocumentType = "protocol"
 	DocumentPrintedPaper DocumentType = "printedPaper"
 )
 
@@ -130,6 +130,20 @@ type ElectionPeriod struct {
 	Number    int       `db:"number" json:"number"`
 	StartDate time.Time `db:"start_date" json:"start_date,omitempty"`
 	EndDate   time.Time `db:"end_date" json:"end_date,omitempty"`
+}
+
+type IngestionStatus string
+
+const (
+	IngestionStatusSuccess IngestionStatus = "success"
+	IngestionStatusFailed  IngestionStatus = "failed"
+)
+
+type IngestionLog struct {
+	ID           int             `db:"id" json:"id,omitempty"`
+	Timestamp    time.Time       `db:"timestamp" json:"timestamp,omitempty"`
+	Status       IngestionStatus `db:"status" json:"status,omitempty"`
+	ErrorMessage sql.NullString  `db:"error_message" json:"error_message,omitempty"`
 }
 
 // TODO: Split protocol parts

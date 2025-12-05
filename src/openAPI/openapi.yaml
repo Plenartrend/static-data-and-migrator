@@ -1,5 +1,5 @@
 ---
-openapi: "3.0.1"
+openapi: "3.1.0"
 info:
   title: "Deutscher Bundestag - DIP"
   description: "API des Dokumentations- und Informationssystems für Parlamentsmaterialien"
@@ -1031,8 +1031,7 @@ components:
             properties:
               code:
                 type: "integer"
-                enum:
-                - 400
+                const: 400
               message:
                 type: "string"
                 example: "Invalid cursor"
@@ -1050,14 +1049,10 @@ components:
             properties:
               code:
                 type: "integer"
-                enum:
-                - 401
+                const: 401
               message:
                 type: "string"
-                enum:
-                - "An API key is required to access this service. Please refer to\
-                  \ https://dip.bundestag.de/über-dip/hilfe/api how to apply for a\
-                  \ key. Misuse of this service may lead to blocking your requests."
+                const: "An API key is required to access this service. Please refer to https://dip.bundestag.de/über-dip/hilfe/api how to apply for a key. Misuse of this service may lead to blocking your requests."
             required:
             - "code"
             - "message"
@@ -1070,8 +1065,7 @@ components:
             properties:
               code:
                 type: "integer"
-                enum:
-                - 404
+                const: 404
               message:
                 type: "string"
                 example: "ID not found: 0"
