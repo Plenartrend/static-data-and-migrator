@@ -1,15 +1,15 @@
-package staticdataandmigrator
+package main
 
 import (
 	"database/sql"
 	"time"
 )
 
-type DocumentType int
+type DocumentType string
 
 const (
-	DocumentProtocol DocumentType = iota
-	DocumentPrintedPaper
+	DocumentProtocol DocumentType = "protocol"
+	DocumentPrintedPaper DocumentType = "printedPaper"
 )
 
 type Body string
