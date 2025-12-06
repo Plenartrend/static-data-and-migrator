@@ -22,9 +22,8 @@ type DBInterface interface {
 	QueryRow(query string, args ...interface{}) *sql.Row
 }
 
-// getOrSetRoleAndWarn checks if a role exists, logs if duplicate, otherwise inserts
-// If exists it logs a warning: this low quality data
-func getOrSetRoleAndWarn(db DBInterface, personID string, name string, lastName string, firstName string, electionPeriod int, groupID *int, logger *Logger) error {
+// setRole sets a role in the database and logs a warning if it already exists. This happens because of low quality data in the API.
+func setRole(db DBInterface, personID string, name string, lastName string, firstName string, electionPeriod int, groupID *int, logger *Logger) error {
 	var exists bool
 	err := db.Get(&exists, `
 		SELECT EXISTS(
@@ -189,7 +188,7 @@ func ingestPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
 				return fmt.Errorf("get election period for person %s: %w", p.Id, err)
 			}
 
-			if err := getOrSetRoleAndWarn(db, p.Id, p.Funktion[0], p.Nachname, p.Vorname, electionPeriod, groupId, logger); err != nil {
+			if err := setRole(db, p.Id, p.Funktion[0], p.Nachname, p.Vorname, electionPeriod, groupId, logger); err != nil {
 				return fmt.Errorf("insert role for person %s: %w", p.Id, err)
 			}
 		}
@@ -218,7 +217,7 @@ func ingestPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
 					if err != nil {
 						return fmt.Errorf("get election period for role: %w", err)
 					}
-					if err := getOrSetRoleAndWarn(db, p.Id, r.Funktion, r.Nachname, r.Vorname, electionPeriod, groupId, logger); err != nil {
+					if err := setRole(db, p.Id, r.Funktion, r.Nachname, r.Vorname, electionPeriod, groupId, logger); err != nil {
 						return fmt.Errorf("insert role: %w", err)
 					}
 				}
