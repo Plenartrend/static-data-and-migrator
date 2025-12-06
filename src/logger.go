@@ -8,51 +8,70 @@ import (
 )
 
 type Logger struct {
-	db              *sqlx.DB
-	minConsoleLevel LogStatus
-	storeDebug      bool
+	db               *sqlx.DB
+	minConsoleLevel  LogStatus
+	minDatabaseLevel LogStatus
 }
 
-func NewLogger(db *sqlx.DB, minLevel LogStatus) *Logger {
-	return &Logger{db: db, minConsoleLevel: minLevel}
+func NewLogger(db *sqlx.DB, minConsoleLevel *LogStatus, minDatabaseLevel *LogStatus) *Logger {
+	defaultLevel := Info
+	if minConsoleLevel == nil {
+		minConsoleLevel = &defaultLevel
+	}
+	if minDatabaseLevel == nil {
+		minDatabaseLevel = &defaultLevel
+	}
+	return &Logger{db: db, minConsoleLevel: *minConsoleLevel, minDatabaseLevel: *minDatabaseLevel}
 }
 
 func (l *Logger) Debug(message string) {
 	if l.minConsoleLevel <= Debug {
-		fmt.Println("Debug: ", message)
+		fmt.Println("DEBUG: ", message)
 	}
-	if l.storeDebug {
+	if l.minDatabaseLevel <= Debug {
 		l.Log(Debug, message)
 	}
 }
 
 func (l *Logger) Info(message string) {
 	if l.minConsoleLevel <= Info {
-		fmt.Println("Info: ", message)
+		fmt.Println("INFO: ", message)
 	}
-	l.Log(Info, message)
+	if l.minDatabaseLevel <= Info {
+		l.Log(Info, message)
+	}
 }
 
 func (l *Logger) Warn(message string) {
 	if l.minConsoleLevel <= Warn {
-		fmt.Println("Warn: ", message)
+		fmt.Println("WARN: ", message)
 	}
-	l.Log(Warn, message)
+	if l.minDatabaseLevel <= Warn {
+		l.Log(Warn, message)
+	}
 }
 
 func (l *Logger) Error(message string) {
-	log.Println("Error: ", message)
-	l.Log(Error, message)
+	if l.minConsoleLevel <= Error {
+		fmt.Println("ERROR: ", message)
+	}
+	if l.minDatabaseLevel <= Error {
+		l.Log(Error, message)
+	}
 }
 
 func (l *Logger) Fatal(message string) {
-	l.Log(Fatal, message)
-	log.Fatal("Fatal: ", message)
+	if l.minDatabaseLevel <= Fatal {
+		l.Log(Fatal, message)
+	}
+	if l.minConsoleLevel <= Fatal {
+		fmt.Println("FATAL: ", message)
+	}
 }
 
 func (l *Logger) Log(status LogStatus, message string) {
 	_, err := l.db.Exec("INSERT INTO logs (timestamp, status, message) VALUES (NOW(), $1, $2)", status, message)
 	if err != nil {
-		log.Printf("Failed to write log to database: %v", err)
+		log.Printf("ERROR:Failed to write log to database: %v", err)
 	}
 }

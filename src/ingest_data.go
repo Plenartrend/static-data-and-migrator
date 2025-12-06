@@ -261,12 +261,20 @@ func ingestData(reinitializeDatabase bool) {
 	defer db.Close()
 
 	// Logger uses db connection (not transaction) so logs always commit even if transaction rolls back
-	logger := NewLogger(db, Info)
+	logger := NewLogger(db, nil, nil)
+
+	// Local helper to log errors to ingestion_logs
+	logIngestionError := func(err error) {
+		if err != nil {
+			_, _ = db.Exec("INSERT INTO ingestion_logs (timestamp, status, error_message) VALUES (NOW(), 'failed', $1)", err.Error())
+		}
+	}
 
 	// Begin transaction
 	tx, err := db.Beginx()
 	if err != nil {
-		logger.Fatal(fmt.Sprintf("failed to begin transaction: %v", err))
+		logIngestionError(err)
+		logger.Error(fmt.Sprintf("failed to begin transaction: %v", err))
 		return
 	}
 	var txErr error
@@ -281,6 +289,8 @@ func ingestData(reinitializeDatabase bool) {
 	if reinitializeDatabase {
 		err = clearApiDatabase(tx, logger)
 		if err != nil {
+			logIngestionError(err)
+			logger.Error(fmt.Sprintf("failed to clear database: %v", err))
 			return
 		}
 	}
@@ -294,7 +304,8 @@ func ingestData(reinitializeDatabase bool) {
 		}),
 	)
 	if err != nil {
-		logger.Fatal(fmt.Sprintf("failed to create client: %v", err))
+		logIngestionError(err)
+		logger.Error(fmt.Sprintf("failed to create client: %v", err))
 		return
 	}
 
@@ -302,14 +313,16 @@ func ingestData(reinitializeDatabase bool) {
 	// Read from tx to see the deleted ingestion_logs (for testing fresh start)
 	lastSuccessTimestamp, err := getLastSuccessTimestamp(tx, logger)
 
-	logger.Info(fmt.Sprintf("last success timestamp: %s", lastSuccessTimestamp))
-
 	if err != nil {
+		logIngestionError(err)
 		return
 	}
 
+	logger.Info(fmt.Sprintf("last success timestamp: %s", lastSuccessTimestamp))
+
 	persons, err := getAllPersons(client, lastSuccessTimestamp, currentTimestamp, logger)
 	if err != nil {
+		logIngestionError(err)
 		txErr = err
 		return
 	}
@@ -318,12 +331,14 @@ func ingestData(reinitializeDatabase bool) {
 
 	err = ingestPersons(tx, persons, logger)
 	if err != nil {
+		logIngestionError(err)
 		txErr = err
 		return
 	}
 
 	_, err = tx.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES (NOW(), 'success')")
 	if err != nil {
+		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to insert ingestion log: %v", err))
 		txErr = err
 		return
@@ -331,6 +346,7 @@ func ingestData(reinitializeDatabase bool) {
 
 	// Commit transaction
 	if err = tx.Commit(); err != nil {
+		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to commit transaction: %v", err))
 		txErr = err
 		return
