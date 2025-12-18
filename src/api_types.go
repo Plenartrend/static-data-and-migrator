@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"slices"
 	"time"
 )
 
@@ -20,6 +21,11 @@ const (
 	Bundesversammlung Body = "BV"
 	Europakammer      Body = "EK"
 )
+
+func IsValidBody(value string) bool {
+	valid := []Body{Bundestag, Bundesrat, Bundesversammlung, Europakammer}
+	return slices.Contains(valid, Body(value))
+}
 
 type Topic struct {
 	ID   int    `db:"id" json:"id,omitempty"`

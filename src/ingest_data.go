@@ -227,6 +227,69 @@ func ingestPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
 	return nil
 }
 
+func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface) error {
+	var cursor *string
+
+	for {
+		resp, err := client.GetPlenarprotokollTextListWithResponse(context.Background(), &dip.GetPlenarprotokollTextListParams{
+			FAktualisiertStart: &lastSuccessTimestamp,
+			FAktualisiertEnd:   &currentTimestamp,
+			Cursor:             cursor,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to get protocol list: %w", err)
+		}
+		if resp.JSON200 == nil {
+			return fmt.Errorf("unexpected response status: %d", resp.StatusCode())
+		}
+
+		for _, p := range resp.JSON200.Documents {
+			err := db.Get(&p, "SELECT * FROM plenartrend.protocols WHERE id=$1", p.Id)
+			exists := err == sql.ErrNoRows
+
+			var pub Body
+			if IsValidBody(string(p.Herausgeber)) {
+				pub = Body(p.Herausgeber)
+			} else {
+				return fmt.Errorf("invalid body value: %s", p.Herausgeber)
+			}
+
+			is_present := *p.Text != "" // TODO do we really need this? We need to update it anyway in case anything has changed.
+
+			if exists {
+				_, err = db.Exec(`
+					UPDATE protocols
+					SET
+					title=$2, document_number=$3, publisher=$4, session_note=$5, url=$6, text=$7, election_period=$8, date=$9,
+					updated=$10, is_present=$11
+					WHERE id=$1
+				`, p.Id, p.Titel, p.Dokumentnummer, pub, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, p.Wahlperiode, p.Datum,
+					p.Aktualisiert, is_present)
+			} else {
+				_, err = db.Exec(`
+					INSERT
+					INTO protocols
+					(id, title, document_number, publisher, session_note, url, text, election_period, date, updated, is_present)
+					VALUES
+					($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+					ON CONFLICT (id) DO NOTHING
+				`, p.Id, p.Titel, p.Dokumentnummer, pub, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, p.Wahlperiode, p.Datum,
+					p.Aktualisiert, is_present)
+			}
+
+			if err != nil {
+				return fmt.Errorf("failed to insert protocol %s: %w", p.Id, err)
+			}
+		}
+
+		if int32(len(resp.JSON200.Documents))+int32(len(resp.JSON200.Documents))*int32(len(resp.JSON200.Documents)) >= resp.JSON200.NumFound {
+			break
+		}
+		cursor = &resp.JSON200.Cursor
+	}
+	return nil
+}
+
 func clearApiDatabase(db DBInterface, logger *Logger) error {
 	// Delete in correct order (children first due to foreign keys)
 	if _, err := db.Exec("DELETE FROM roles"); err != nil {
@@ -332,6 +395,14 @@ func ingestData(reinitializeDatabase bool) {
 	err = ingestPersons(tx, persons, logger)
 	if err != nil {
 		logIngestionError(err)
+		txErr = err
+		return
+	}
+
+	err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx)
+	if err != nil {
+		logIngestionError(err)
+		logger.Error(fmt.Sprintf("failed to ingest protocols: %v", err))
 		txErr = err
 		return
 	}
