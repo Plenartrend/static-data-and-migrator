@@ -227,7 +227,7 @@ func ingestPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
 	return nil
 }
 
-func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface) error {
+func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) error {
 	var cursor *string
 
 	for {
@@ -244,14 +244,26 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 		}
 
 		for _, p := range resp.JSON200.Documents {
-			err := db.Get(&p, "SELECT * FROM plenartrend.protocols WHERE id=$1", p.Id)
-			exists := err == sql.ErrNoRows
+			var exists bool
+			err := db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM protocols WHERE id=$1)", p.Id)
+			if err != nil {
+				return fmt.Errorf("error checking existence of protocol %s: %w", p.Id, err)
+			}
 
-			var pub Body
+			var publisher Body
 			if IsValidBody(string(p.Herausgeber)) {
-				pub = Body(p.Herausgeber)
+				publisher = Body(p.Herausgeber)
 			} else {
 				return fmt.Errorf("invalid body value: %s", p.Herausgeber)
+			}
+
+			electionPeriod := sql.NullInt32{Valid: false}
+			if p.Wahlperiode != nil {
+				ep, err := getOrSetElectionPeriod(db, int(*p.Wahlperiode), logger)
+				if err != nil {
+					return fmt.Errorf("error getting/setting election period for protocol %s: %w", p.Id, err)
+				}
+				electionPeriod = sql.NullInt32{Int32: int32(ep), Valid: true}
 			}
 
 			is_present := *p.Text != "" // TODO do we really need this? We need to update it anyway in case anything has changed.
@@ -263,7 +275,7 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 					title=$2, document_number=$3, publisher=$4, session_note=$5, url=$6, text=$7, election_period=$8, date=$9,
 					updated=$10, is_present=$11
 					WHERE id=$1
-				`, p.Id, p.Titel, p.Dokumentnummer, pub, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, p.Wahlperiode, p.Datum,
+				`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum,
 					p.Aktualisiert, is_present)
 			} else {
 				_, err = db.Exec(`
@@ -273,7 +285,7 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 					VALUES
 					($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 					ON CONFLICT (id) DO NOTHING
-				`, p.Id, p.Titel, p.Dokumentnummer, pub, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, p.Wahlperiode, p.Datum,
+				`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum,
 					p.Aktualisiert, is_present)
 			}
 
@@ -399,7 +411,7 @@ func ingestData(reinitializeDatabase bool) {
 		return
 	}
 
-	err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx)
+	err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 	if err != nil {
 		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to ingest protocols: %v", err))
