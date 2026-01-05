@@ -404,7 +404,8 @@ func ingestPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, log
 				var roleId int
 				err := db.Get(&roleId, "SELECT id FROM roles WHERE person_id=$1 AND election_period=$2", author.Id, electionPeriod)
 				if err != nil {
-					return fmt.Errorf("failed to get role for printed paper author %s: %w", p.Id, err)
+					logger.Warn(fmt.Sprintf("skipping author %s for printed paper %s: role not found", author.Id, p.Id))
+					continue
 				}
 
 				_, err = db.Exec(`
@@ -413,7 +414,7 @@ func ingestPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, log
 				ON CONFLICT DO NOTHING
 			`, p.Id, roleId)
 				if err != nil {
-					return fmt.Errorf("failed to insert printed paper author for paper %s: %w", p.Id, err)
+					logger.Warn(fmt.Sprintf("failed to insert author %s for printed paper %s: %v", author.Id, p.Id, err))
 				}
 			}
 		}
@@ -465,7 +466,8 @@ func ingestActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logge
 		var roleId int
 		err = db.Get(&roleId, `SELECT id from roles where person_id = $1 and election_period = $2`, a.PersonId, electionPeriod)
 		if err != nil {
-			return fmt.Errorf("error getting role of person %s in election period %d for activity %s: %w", a.PersonId, electionPeriod, a.Id, err)
+			logger.Warn(fmt.Sprintf("skipping activity %s: role not found for person %s in election period %d", a.Id, a.PersonId, electionPeriod))
+			continue
 		}
 
 		documentTypeMap := map[dip.AktivitaetDokumentart]DocumentType{
@@ -474,7 +476,8 @@ func ingestActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logge
 		}
 		documentType, ok := documentTypeMap[a.Dokumentart]
 		if !ok {
-			return fmt.Errorf("invalid document type for activity %s: %s", a.Id, a.Dokumentart)
+			logger.Warn(fmt.Sprintf("skipping activity %s: invalid document type: %s", a.Id, a.Dokumentart))
+			continue
 		}
 
 		printedPaperId := sql.NullInt32{Valid: false}
@@ -484,14 +487,16 @@ func ingestActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logge
 			var ppId int32
 			err = db.Get(&ppId, "SELECT id FROM printed_papers WHERE id=$1", a.Fundstelle.Id)
 			if err != nil {
-				return fmt.Errorf("error retrieving printed paper id %s for activity %s: %w", a.Fundstelle.Id, a.Id, err)
+				logger.Warn(fmt.Sprintf("skipping activity %s: printed paper %s not found", a.Id, a.Fundstelle.Id))
+				continue
 			}
 			printedPaperId = sql.NullInt32{Int32: ppId, Valid: true}
 		} else {
 			var pId int32
 			err = db.Get(&pId, "SELECT id FROM protocols WHERE id=$1", a.Fundstelle.Id)
 			if err != nil {
-				return fmt.Errorf("error retrieving protocol id %s for activity %s: %w", a.Fundstelle.Id, a.Id, err)
+				logger.Warn(fmt.Sprintf("skipping activity %s: protocol %s not found", a.Id, a.Fundstelle.Id))
+				continue
 			}
 			protocolId = sql.NullInt32{Int32: pId, Valid: true}
 		}
