@@ -246,7 +246,7 @@ func getProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.Tim
 
 		protocols = append(protocols, resp.JSON200.Documents...)
 
-		if int32(len(resp.JSON200.Documents))+int32(len(resp.JSON200.Documents))*int32(len(resp.JSON200.Documents)) >= resp.JSON200.NumFound {
+		if int32(len(protocols)) >= resp.JSON200.NumFound {
 			break
 		}
 		cursor = &resp.JSON200.Cursor
@@ -329,7 +329,7 @@ func getPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp time
 
 		printedPapers = append(printedPapers, resp.JSON200.Documents...)
 
-		if int32(len(resp.JSON200.Documents))+int32(len(resp.JSON200.Documents))*int32(len(resp.JSON200.Documents)) >= resp.JSON200.NumFound {
+		if int32(len(printedPapers)) >= resp.JSON200.NumFound {
 			break
 		}
 		cursor = &resp.JSON200.Cursor
@@ -436,7 +436,7 @@ func getActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 
 		activities = append(activities, resp.JSON200.Documents...)
 
-		if int32(len(resp.JSON200.Documents))+int32(len(resp.JSON200.Documents))*int32(len(resp.JSON200.Documents)) >= resp.JSON200.NumFound {
+		if int32(len(activities)) >= resp.JSON200.NumFound {
 			break
 		}
 		cursor = &resp.JSON200.Cursor
