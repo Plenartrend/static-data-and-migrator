@@ -417,6 +417,107 @@ func ingestPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, log
 	return nil
 }
 
+func getActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time) ([]dip.Aktivitaet, error) {
+	var activities = make([]dip.Aktivitaet, 0)
+	var cursor *string
+
+	for {
+		resp, err := client.GetAktivitaetListWithResponse(context.Background(), &dip.GetAktivitaetListParams{
+			FAktualisiertStart: &lastSuccessTimestamp,
+			FAktualisiertEnd:   &currentTimestamp,
+			Cursor:             cursor,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to get activity list: %w", err)
+		}
+		if resp.JSON200 == nil {
+			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
+		}
+
+		activities = append(activities, resp.JSON200.Documents...)
+
+		if int32(len(resp.JSON200.Documents))+int32(len(resp.JSON200.Documents))*int32(len(resp.JSON200.Documents)) >= resp.JSON200.NumFound {
+			break
+		}
+		cursor = &resp.JSON200.Cursor
+	}
+	return activities, nil
+}
+
+func ingestActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logger) error {
+	for _, a := range activities {
+		var exists bool
+		err := db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM plenartrend.activities WHERE id=$1)", a.Id)
+		if err != nil {
+			return fmt.Errorf("error checking existence of activity %s: %w", a.Id, err)
+		}
+
+		electionPeriod, err := getOrSetElectionPeriod(db, int(a.Wahlperiode), logger)
+		if err != nil {
+			return fmt.Errorf("error getting/setting election period for activity %s: %w", a.Id, err)
+		}
+
+		var roleId int
+		err = db.Get(&roleId, `SELECT id from roles where person_id = $1 and election_period = $2`, a.PersonId, electionPeriod)
+		if err != nil {
+			return fmt.Errorf("error getting role of person %s in election period %d for activity %s: %w", a.PersonId, electionPeriod, a.Id, err)
+		}
+
+		documentTypeMap := map[dip.AktivitaetDokumentart]DocumentType{
+			"Plenarprotokoll": DocumentProtocol,
+			"Drucksache":      DocumentPrintedPaper,
+		}
+		documentType, ok := documentTypeMap[a.Dokumentart]
+		if !ok {
+			return fmt.Errorf("invalid document type for activity %s: %s", a.Id, a.Dokumentart)
+		}
+
+		printedPaperId := sql.NullInt32{Valid: false}
+		protocolId := sql.NullInt32{Valid: false}
+
+		if documentType == DocumentPrintedPaper {
+			var ppId int32
+			err = db.Get(&ppId, "SELECT id FROM printed_papers WHERE id=$1", a.Fundstelle.Id)
+			if err != nil {
+				return fmt.Errorf("error retrieving printed paper id %s for activity %s: %w", a.Fundstelle.Id, a.Id, err)
+			}
+			printedPaperId = sql.NullInt32{Int32: ppId, Valid: true}
+		} else {
+			var pId int32
+			err = db.Get(&pId, "SELECT id FROM protocols WHERE id=$1", a.Fundstelle.Id)
+			if err != nil {
+				return fmt.Errorf("error retrieving protocol id %s for activity %s: %w", a.Fundstelle.Id, a.Id, err)
+			}
+			protocolId = sql.NullInt32{Int32: pId, Valid: true}
+		}
+
+		var text string = "" // TODO what is the text of the activity?
+
+		if exists {
+			_, err = db.Exec(`
+				INSERT INTO activities
+				(id, type, role_id, document_type, printed_paper_id, protocol_id, text)
+				VALUES
+				($1, $2, $3, $4, $5, $6, $7)
+				ON CONFLICT (id) DO NOTHING
+			`, a.Id, a.Typ, roleId, documentType, printedPaperId, protocolId, text)
+		} else {
+			_, err = db.Exec(`
+				UPDATE activities
+				SET
+				type=$2, role_id=$3, document_type=$4, printed_paper_id=$5, protocol_id=$6, text=$7
+				WHERE id=$1
+			`, a.Id, a.Typ, roleId, documentType, printedPaperId, protocolId, text)
+		}
+
+		if err != nil {
+			return fmt.Errorf("failed to insert activity %s: %w", a.Id, err)
+		}
+	}
+
+	return nil
+}
+
 func clearApiDatabase(db DBInterface, logger *Logger) error {
 	// Delete in correct order (children first due to foreign keys)
 	if _, err := db.Exec("DELETE FROM roles"); err != nil {
@@ -556,6 +657,23 @@ func ingestData(reinitializeDatabase bool) {
 	if err != nil {
 		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to ingest printed papers: %v", err))
+		txErr = err
+		return
+	}
+
+	activities, err := getActivities(client, lastSuccessTimestamp, currentTimestamp)
+	if err != nil {
+		logIngestionError(err)
+		txErr = err
+		return
+	}
+
+	logger.Info(fmt.Sprintf("ingesting %d activities", len(activities)))
+
+	err = ingestActivities(activities, tx, logger)
+	if err != nil {
+		logIngestionError(err)
+		logger.Error(fmt.Sprintf("failed to ingest activities: %v", err))
 		txErr = err
 		return
 	}
