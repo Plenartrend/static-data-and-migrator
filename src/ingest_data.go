@@ -251,6 +251,7 @@ func getProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.Tim
 		}
 		cursor = &resp.JSON200.Cursor
 	}
+
 	return protocols, nil
 }
 
@@ -303,6 +304,113 @@ func ingestProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logger
 
 		if err != nil {
 			return fmt.Errorf("failed to insert protocol %s: %w", p.Id, err)
+		}
+	}
+
+	return nil
+}
+
+func getPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time) ([]dip.DrucksacheText, error) {
+	var printedPapers = make([]dip.DrucksacheText, 0)
+	var cursor *string
+
+	for {
+		resp, err := client.GetDrucksacheTextListWithResponse(context.Background(), &dip.GetDrucksacheTextListParams{
+			FAktualisiertStart: &lastSuccessTimestamp,
+			FAktualisiertEnd:   &currentTimestamp,
+			Cursor:             cursor,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to get printed paper list: %w", err)
+		}
+		if resp.JSON200 == nil {
+			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
+		}
+
+		printedPapers = append(printedPapers, resp.JSON200.Documents...)
+
+		if int32(len(resp.JSON200.Documents))+int32(len(resp.JSON200.Documents))*int32(len(resp.JSON200.Documents)) >= resp.JSON200.NumFound {
+			break
+		}
+		cursor = &resp.JSON200.Cursor
+	}
+
+	return printedPapers, nil
+}
+
+func ingestPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, logger *Logger) error {
+	for _, p := range printedPapers {
+		var exists bool
+		err := db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM plenartrend.printed_papers WHERE id=$1)", p.Id)
+		if err != nil {
+			return fmt.Errorf("error checking existence of printed paper %s: %w", p.Id, err)
+		}
+
+		electionPeriod, err := getOrSetElectionPeriod(db, int(*p.Wahlperiode), logger)
+		if err != nil {
+			return fmt.Errorf("error getting/setting election period for protocol %s: %w", p.Id, err)
+		}
+
+		var groupId int
+		for _, author := range *p.AutorenAnzeige {
+			err := db.Get(&groupId, `SELECT group_id from roles where person_id = $1 and election_period = $2`, author.Id, electionPeriod)
+			if err != nil {
+				return fmt.Errorf("failed to get group for author %s of printed paper %s in election period %d: %w", author.Id, p.Id, electionPeriod, err)
+			}
+			if groupId != -1 { // TODO is this ever -1?
+				break // TODO this results in the group of the first author to be used, which is fine, right?
+			}
+		}
+
+		var passedDate sql.NullTime         // TODO how do we get this information?
+		var activeDate sql.NullTime         // TODO how do we get this information?
+		var is_present bool = *p.Text != "" // TODO do we really need this? We need to update it anyway in case anything has changed.
+
+		if exists {
+			_, err = db.Exec(`
+				UPDATE printed_papers
+				SET
+				type=$2, title=$3, document_number=$4, publisher=$5, group_id=$6, url=$7, text=$8, election_period=$9, date=$10,
+				updated=$11, passed_date=$12, active_date=$13, is_present=$14
+				WHERE id=$1
+			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum,
+				p.Aktualisiert, passedDate, activeDate, is_present)
+		} else {
+			_, err = db.Exec(`
+				INSERT INTO printed_papers
+				(id, type, title, document_number, publisher, group_id, url, text, election_period, date, updated, passed_date, active_date, is_present)
+				VALUES
+				($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+				ON CONFLICT (id) DO NOTHING
+			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum,
+				p.Aktualisiert, passedDate, activeDate, is_present)
+		}
+
+		if err != nil {
+			return fmt.Errorf("failed to insert printed paper %s: %w", p.Id, err)
+		}
+
+		_, err = db.Exec("DELETE FROM printed_paper_signers WHERE printed_paper_id=$1", p.Id)
+		if err != nil {
+			return fmt.Errorf("failed to delete printed paper signers for paper %s: %w", p.Id, err)
+		}
+
+		// TODO AutorenAnzeige does not contain all authors, we need to extract them from the text
+		for _, author := range *p.AutorenAnzeige {
+			var roleId int
+			err := db.Get(&roleId, "SELECT id FROM roles WHERE person_id=$1 AND election_period=$2", author.Id, electionPeriod)
+			if err != nil {
+				return fmt.Errorf("failed to get role for printed paper author %s: %w", p.Id, err)
+			}
+
+			_, err = db.Exec(`
+				INSERT INTO printed_paper_signers (printed_paper_id, role_id)
+				VALUES ($1, $2)
+				ON CONFLICT DO NOTHING
+			`, p.Id, roleId)
+			if err != nil {
+				return fmt.Errorf("failed to insert printed paper author for paper %s: %w", p.Id, err)
+			}
 		}
 	}
 
@@ -431,6 +539,23 @@ func ingestData(reinitializeDatabase bool) {
 	if err != nil {
 		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to ingest protocols: %v", err))
+		txErr = err
+		return
+	}
+
+	printedPapers, err := getPrintedPapers(client, lastSuccessTimestamp, currentTimestamp)
+	if err != nil {
+		logIngestionError(err)
+		txErr = err
+		return
+	}
+
+	logger.Info(fmt.Sprintf("ingesting %d printed papers", len(printedPapers)))
+
+	err = ingestPrintedPapers(printedPapers, tx, logger)
+	if err != nil {
+		logIngestionError(err)
+		logger.Error(fmt.Sprintf("failed to ingest printed papers: %v", err))
 		txErr = err
 		return
 	}
