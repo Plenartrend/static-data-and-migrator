@@ -36,7 +36,7 @@ func setRole(db DBInterface, personID string, name string, lastName string, firs
 	}
 
 	if exists {
-		logger.Warn(fmt.Sprintf("skipping duplicate role for person %s, election period %d", personID, electionPeriod))
+		logger.Info(fmt.Sprintf("skipping duplicate role for person %s, election period %d", personID, electionPeriod))
 		return nil
 	}
 
@@ -52,7 +52,7 @@ func getLastSuccessTimestamp(db DBInterface, logger *Logger) (time.Time, error) 
 	var lastSuccessTimestamp time.Time
 	err := db.Get(&lastSuccessTimestamp, "SELECT l.timestamp FROM ingestion_logs l WHERE l.status = 'success' ORDER BY l.timestamp DESC LIMIT 1")
 	if err == sql.ErrNoRows {
-		lastSuccessTimestamp = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+		lastSuccessTimestamp = time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC) //TODO: In prod this is emoty (minimal) date
 	} else if err != nil {
 		logger.Error(fmt.Sprintf("Failed to query last success timestamp: %v", err))
 		return time.Time{}, fmt.Errorf("failed to query last success timestamp: %w", err)
@@ -146,14 +146,14 @@ func getOrSetGroupByName(db DBInterface, shortName *string, name *string, logger
 
 func ingestPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
 	for _, p := range persons {
-		_, err := db.Exec("INSERT INTO persons (id) VALUES ($1)", p.Id)
+		_, err := db.Exec("INSERT INTO persons (id, api_updated) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET api_updated = $2", p.Id, p.Aktualisiert)
 		if err != nil {
 			logger.Error(fmt.Sprintf("failed to insert person: %v", err))
 			return fmt.Errorf("insert person %s: %w", p.Id, err)
 		}
 
 		// ----Validate required fields----
-		if len(p.Funktion) == 0 || len(p.Funktion) > 1 {
+		if len(p.Funktion) != 1 {
 			logger.Error(fmt.Sprintf("person %s: expected 1 Funktion, got %d", p.Id, len(p.Funktion)))
 			return fmt.Errorf("person %s: expected 1 Funktion, got %d", p.Id, len(p.Funktion))
 		}
@@ -286,19 +286,19 @@ func ingestProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logger
 				UPDATE protocols
 				SET
 				title=$2, document_number=$3, publisher=$4, session_note=$5, url=$6, text=$7, election_period=$8, date=$9,
-				updated=$10, is_present=$11
+				api_updated=$10, is_present=$11
 				WHERE id=$1
-			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum,
+			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum.Time,
 				p.Aktualisiert, is_present)
 		} else {
 			_, err = db.Exec(`
 				INSERT
 				INTO protocols
-				(id, title, document_number, publisher, session_note, url, text, election_period, date, updated, is_present)
+				(id, title, document_number, publisher, session_note, url, text, election_period, date, api_updated, is_present)
 				VALUES
 				($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 				ON CONFLICT (id) DO NOTHING
-			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum,
+			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum.Time,
 				p.Aktualisiert, is_present)
 		}
 
@@ -351,15 +351,12 @@ func ingestPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, log
 			return fmt.Errorf("error getting/setting election period for protocol %s: %w", p.Id, err)
 		}
 
-		var groupId int
-		for _, author := range *p.AutorenAnzeige {
-			err := db.Get(&groupId, `SELECT group_id from roles where person_id = $1 and election_period = $2`, author.Id, electionPeriod)
-			if err != nil {
-				return fmt.Errorf("failed to get group for author %s of printed paper %s in election period %d: %w", author.Id, p.Id, electionPeriod, err)
-			}
-			if groupId != -1 { // TODO is this ever -1?
-				break // TODO this results in the group of the first author to be used, which is fine, right?
-			}
+		if len(p.Fundstelle.Urheber) != 1 {
+			logger.Warn(fmt.Sprintf("printed paper %s has %d Urheber, expected 1", p.Id, len(p.Fundstelle.Urheber)))
+		}
+		groupId, err := getOrSetGroupByName(db, nil, &p.Fundstelle.Urheber[0], logger)
+		if err != nil {
+			return fmt.Errorf("error getting/setting group for printed paper %s: %w", p.Id, err)
 		}
 
 		var passedDate sql.NullTime         // TODO how do we get this information?
@@ -371,18 +368,18 @@ func ingestPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, log
 				UPDATE printed_papers
 				SET
 				type=$2, title=$3, document_number=$4, publisher=$5, group_id=$6, url=$7, text=$8, election_period=$9, date=$10,
-				updated=$11, passed_date=$12, active_date=$13, is_present=$14
+				api_updated=$11, passed_date=$12, active_date=$13, is_present=$14
 				WHERE id=$1
-			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum,
+			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum.Time,
 				p.Aktualisiert, passedDate, activeDate, is_present)
 		} else {
 			_, err = db.Exec(`
 				INSERT INTO printed_papers
-				(id, type, title, document_number, publisher, group_id, url, text, election_period, date, updated, passed_date, active_date, is_present)
+				(id, type, title, document_number, publisher, group_id, url, text, election_period, date, api_updated, passed_date, active_date, is_present)
 				VALUES
 				($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 				ON CONFLICT (id) DO NOTHING
-			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum,
+			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum.Time,
 				p.Aktualisiert, passedDate, activeDate, is_present)
 		}
 
@@ -518,33 +515,53 @@ func ingestActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logge
 	return nil
 }
 
-func clearApiDatabase(db DBInterface, logger *Logger) error {
+func clearApiDatabaseFrom(reinitializeNewerThan *time.Time, db DBInterface, logger *Logger) error {
 	// Delete in correct order (children first due to foreign keys)
-	if _, err := db.Exec("DELETE FROM roles"); err != nil {
+	newerThanString := ""
+	newerThanIngestionString := ""
+	if reinitializeNewerThan != nil {
+		newerThanString = fmt.Sprintf("WHERE updated >= '%s'", reinitializeNewerThan.Format("2006-01-02 15:04:05"))
+		newerThanIngestionString = fmt.Sprintf("WHERE timestamp >= '%s'", reinitializeNewerThan.Format("2006-01-02 15:04:05"))
+	}
+
+	if _, err := db.Exec(fmt.Sprintf("DELETE FROM roles %s", newerThanString)); err != nil {
 		logger.Error(fmt.Sprintf("failed to delete roles: %v", err))
 		return fmt.Errorf("delete roles: %w", err)
 	}
-	if _, err := db.Exec("DELETE FROM persons"); err != nil {
+	if _, err := db.Exec(fmt.Sprintf("DELETE FROM persons %s", newerThanString)); err != nil {
 		logger.Error(fmt.Sprintf("failed to delete persons: %v", err))
 		return fmt.Errorf("delete persons: %w", err)
 	}
-	if _, err := db.Exec("DELETE FROM election_periods"); err != nil {
+	if _, err := db.Exec(fmt.Sprintf("DELETE FROM election_periods %s", newerThanString)); err != nil {
 		logger.Error(fmt.Sprintf("failed to delete election_periods: %v", err))
 		return fmt.Errorf("delete election_periods: %w", err)
 	}
-	if _, err := db.Exec("DELETE FROM parliamentary_groups"); err != nil {
+	if _, err := db.Exec(fmt.Sprintf("DELETE FROM parliamentary_groups %s", newerThanString)); err != nil {
 		logger.Error(fmt.Sprintf("failed to delete parliamentary_groups: %v", err))
 		return fmt.Errorf("delete parliamentary_groups: %w", err)
 	}
-	if _, err := db.Exec("DELETE FROM ingestion_logs"); err != nil {
+
+	if _, err := db.Exec(fmt.Sprintf("DELETE FROM ingestion_logs %s", newerThanIngestionString)); err != nil {
 		logger.Error(fmt.Sprintf("failed to delete ingestion_logs: %v", err))
 		return fmt.Errorf("delete ingestion_logs: %w", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("DELETE FROM protocols %s", newerThanString)); err != nil {
+		logger.Error(fmt.Sprintf("failed to delete protocols: %v", err))
+		return fmt.Errorf("delete protocols: %w", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("DELETE FROM printed_papers %s", newerThanString)); err != nil {
+		logger.Error(fmt.Sprintf("failed to delete printed_papers: %v", err))
+		return fmt.Errorf("delete printed_papers: %w", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("DELETE FROM activities %s", newerThanString)); err != nil {
+		logger.Error(fmt.Sprintf("failed to delete activities: %v", err))
+		return fmt.Errorf("delete activities: %w", err)
 	}
 	logger.Info("Cleared existing data")
 	return nil
 }
 
-func ingestData(reinitializeDatabase bool) {
+func ingestData(reinitializeDatabase bool, reinitializeNewerThan *time.Time) error {
 	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
@@ -557,6 +574,7 @@ func ingestData(reinitializeDatabase bool) {
 	// Local helper to log errors to ingestion_logs
 	logIngestionError := func(err error) {
 		if err != nil {
+			logger.Error(fmt.Sprintf("Failed to ingest data: %v", err))
 			_, _ = db.Exec("INSERT INTO ingestion_logs (timestamp, status, error_message) VALUES (NOW(), 'failed', $1)", err.Error())
 		}
 	}
@@ -566,7 +584,7 @@ func ingestData(reinitializeDatabase bool) {
 	if err != nil {
 		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to begin transaction: %v", err))
-		return
+		return err
 	}
 	var txErr error
 	defer func() {
@@ -578,11 +596,11 @@ func ingestData(reinitializeDatabase bool) {
 	}()
 
 	if reinitializeDatabase {
-		err = clearApiDatabase(tx, logger)
+		err = clearApiDatabaseFrom(reinitializeNewerThan, tx, logger)
 		if err != nil {
 			logIngestionError(err)
 			logger.Error(fmt.Sprintf("failed to clear database: %v", err))
-			return
+			return err
 		}
 	}
 	// Create a client with the DIP API server URL
@@ -597,25 +615,32 @@ func ingestData(reinitializeDatabase bool) {
 	if err != nil {
 		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to create client: %v", err))
-		return
+		return err
 	}
 
 	var currentTimestamp = time.Now().UTC()
 	// Read from tx to see the deleted ingestion_logs (for testing fresh start)
-	lastSuccessTimestamp, err := getLastSuccessTimestamp(tx, logger)
+	lastSuccessTimestamp := time.Time{}
 
-	if err != nil {
-		logIngestionError(err)
-		return
+	if reinitializeDatabase && reinitializeNewerThan != nil {
+		lastSuccessTimestamp = *reinitializeNewerThan
+		logger.Info(fmt.Sprintf("last success timestamp for reinitialization: %s", lastSuccessTimestamp))
+	} else if !reinitializeDatabase {
+		lastSuccessTimestamp, err = getLastSuccessTimestamp(tx, logger)
+		logger.Info(fmt.Sprintf("last success timestamp from database: %s", lastSuccessTimestamp))
+		if err != nil {
+			logIngestionError(err)
+			return err
+		}
 	}
 
-	logger.Info(fmt.Sprintf("last success timestamp: %s", lastSuccessTimestamp))
+	logger.Info(fmt.Sprintf("getting persons"))
 
 	persons, err := getAllPersons(client, lastSuccessTimestamp, currentTimestamp, logger)
 	if err != nil {
 		logIngestionError(err)
 		txErr = err
-		return
+		return err
 	}
 
 	logger.Info(fmt.Sprintf("ingesting %d persons", len(persons)))
@@ -624,14 +649,16 @@ func ingestData(reinitializeDatabase bool) {
 	if err != nil {
 		logIngestionError(err)
 		txErr = err
-		return
+		return err
 	}
+
+	logger.Info(fmt.Sprintf("getting protocols"))
 
 	protocols, err := getProtocols(client, lastSuccessTimestamp, currentTimestamp)
 	if err != nil {
 		logIngestionError(err)
 		txErr = err
-		return
+		return err
 	}
 
 	logger.Info(fmt.Sprintf("ingesting %d protocols", len(protocols)))
@@ -641,14 +668,14 @@ func ingestData(reinitializeDatabase bool) {
 		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to ingest protocols: %v", err))
 		txErr = err
-		return
+		return err
 	}
 
 	printedPapers, err := getPrintedPapers(client, lastSuccessTimestamp, currentTimestamp)
 	if err != nil {
 		logIngestionError(err)
 		txErr = err
-		return
+		return err
 	}
 
 	logger.Info(fmt.Sprintf("ingesting %d printed papers", len(printedPapers)))
@@ -658,14 +685,16 @@ func ingestData(reinitializeDatabase bool) {
 		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to ingest printed papers: %v", err))
 		txErr = err
-		return
+		return err
 	}
+
+	logger.Info(fmt.Sprintf("getting activities"))
 
 	activities, err := getActivities(client, lastSuccessTimestamp, currentTimestamp)
 	if err != nil {
 		logIngestionError(err)
 		txErr = err
-		return
+		return err
 	}
 
 	logger.Info(fmt.Sprintf("ingesting %d activities", len(activities)))
@@ -675,7 +704,7 @@ func ingestData(reinitializeDatabase bool) {
 		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to ingest activities: %v", err))
 		txErr = err
-		return
+		return err
 	}
 
 	_, err = tx.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES (NOW(), 'success')")
@@ -683,7 +712,7 @@ func ingestData(reinitializeDatabase bool) {
 		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to insert ingestion log: %v", err))
 		txErr = err
-		return
+		return err
 	}
 
 	// Commit transaction
@@ -691,8 +720,9 @@ func ingestData(reinitializeDatabase bool) {
 		logIngestionError(err)
 		logger.Error(fmt.Sprintf("failed to commit transaction: %v", err))
 		txErr = err
-		return
+		return err
 	}
 
 	logger.Info(fmt.Sprintf("Successfully ingested %d persons", len(persons)))
+	return nil
 }

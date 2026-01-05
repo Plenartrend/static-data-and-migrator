@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
@@ -42,13 +43,21 @@ func main() {
 
 	http.HandleFunc("/ingest", func(w http.ResponseWriter, r *http.Request) {
 		reinitializeApiData := r.URL.Query().Get("reinitializeApiData") == "true"
-		if reinitializeApiData {
-			ingestData(true)
-		} else {
-			ingestData(false)
+		reinitializeNewerThan, err := time.Parse(time.RFC3339, r.URL.Query().Get("reinitializeNewerThan"))
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, "Failed to parse reinitializeNewerThan", err)
+			return
 		}
+		err = ingestData(reinitializeApiData, &reinitializeNewerThan)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, "Failed to ingest data")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "Data ingested successfully")
 	})
-
 	log.Println("Server starting on :8080")
 	http.ListenAndServe(":8080", nil)
 }

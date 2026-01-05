@@ -28,8 +28,10 @@ func IsValidBody(value string) bool {
 }
 
 type Topic struct {
-	ID   int    `db:"id" json:"id,omitempty"`
-	Name string `db:"name" json:"name,omitempty"`
+	ID      int       `db:"id" json:"id,omitempty"`
+	Name    string    `db:"name" json:"name,omitempty"`
+	Updated time.Time `db:"updated" json:"updated,omitempty"`
+	Created time.Time `db:"created" json:"created,omitempty"`
 }
 
 type Process struct {
@@ -42,12 +44,16 @@ type Process struct {
 	ElectionPeriod int       `db:"election_period" json:"election_period,omitempty"`
 	Type           string    `db:"type" json:"type,omitempty"`
 	Date           time.Time `db:"date" json:"date,omitempty"`
+	APIUpdated     time.Time `db:"api_updated" json:"api_updated,omitempty"`
 	Updated        time.Time `db:"updated" json:"updated,omitempty"`
+	Created        time.Time `db:"created" json:"created,omitempty"`
 }
 
 type ProcessTopics struct {
-	ProcessID int `db:"process_id" json:"process_id,omitempty"`
-	TopicID   int `db:"topic_id" json:"topic_id,omitempty"`
+	ProcessID int       `db:"process_id" json:"process_id,omitempty"`
+	TopicID   int       `db:"topic_id" json:"topic_id,omitempty"`
+	Updated   time.Time `db:"updated" json:"updated,omitempty"`
+	Created   time.Time `db:"created" json:"created,omitempty"`
 }
 
 // Is this type necessary???
@@ -61,7 +67,9 @@ type ProcessPosition struct {
 	Title        string       `db:"title" json:"title,omitempty"`
 	DocumentType DocumentType `db:"document_type" json:"document_type,omitempty"`
 	Date         time.Time    `db:"date" json:"date,omitempty"`
+	APIUpdated   time.Time    `db:"api_updated" json:"api_updated,omitempty"`
 	Updated      time.Time    `db:"updated" json:"updated,omitempty"`
+	Created      time.Time    `db:"created" json:"created,omitempty"`
 }
 
 type PrintedPaper struct {
@@ -75,15 +83,19 @@ type PrintedPaper struct {
 	Text           string       `db:"text" json:"text,omitempty"`
 	ElectionPeriod int          `db:"election_period" json:"election_period,omitempty"`
 	Date           time.Time    `db:"date" json:"date,omitempty"`
-	Updated        time.Time    `db:"updated" json:"updated,omitempty"`
+	APIUpdated     time.Time    `db:"api_updated" json:"api_updated,omitempty"`
 	PassedDate     sql.NullTime `db:"passed_date" json:"passed_date,omitempty"`
 	ActiveDate     sql.NullTime `db:"active_date" json:"active_date,omitempty"`
 	IsPresent      bool         `db:"is_present" json:"is_present,omitempty"`
+	Updated        time.Time    `db:"updated" json:"updated,omitempty"`
+	Created        time.Time    `db:"created" json:"created,omitempty"`
 }
 
 type PrintedPaperSigner struct {
-	PrintedPaperID int `db:"printed_paper_id" json:"printed_paper_id,omitempty"`
-	RoleID         int `db:"role_id" json:"role_id,omitempty"`
+	PrintedPaperID int       `db:"printed_paper_id" json:"printed_paper_id,omitempty"`
+	RoleID         int       `db:"role_id" json:"role_id,omitempty"`
+	Updated        time.Time `db:"updated" json:"updated,omitempty"`
+	Created        time.Time `db:"created" json:"created,omitempty"`
 }
 
 type Protocol struct {
@@ -96,8 +108,10 @@ type Protocol struct {
 	Text           string    `db:"text" json:"text,omitempty"`
 	ElectionPeriod int       `db:"election_period" json:"election_period,omitempty"`
 	Date           time.Time `db:"date" json:"date,omitempty"`
-	Updated        time.Time `db:"updated" json:"updated,omitempty"`
+	APIUpdated     time.Time `db:"api_updated" json:"api_updated,omitempty"`
 	IsPresent      bool      `db:"is_present" json:"is_present,omitempty"`
+	Updated        time.Time `db:"updated" json:"updated,omitempty"`
+	Created        time.Time `db:"created" json:"created,omitempty"`
 }
 
 type Activity struct {
@@ -108,16 +122,23 @@ type Activity struct {
 	PrintedPaperID sql.NullInt64 `db:"printed_paper_id" json:"printed_paper_id,omitempty"`
 	ProtocolID     sql.NullInt64 `db:"protocol_id" json:"protocol_id,omitempty"`
 	Text           string        `db:"text" json:"text,omitempty"`
+	Updated        time.Time     `db:"updated" json:"updated,omitempty"`
+	Created        time.Time     `db:"created" json:"created,omitempty"`
 }
 
 type Person struct {
-	ID int `db:"id" json:"id,omitempty"`
+	ID         int       `db:"id" json:"id,omitempty"`
+	APIUpdated time.Time `db:"api_updated" json:"api_updated,omitempty"`
+	Updated    time.Time `db:"updated" json:"updated,omitempty"`
+	Created    time.Time `db:"created" json:"created,omitempty"`
 }
 
 type ParliamentaryGroup struct {
 	ID        int            `db:"id" json:"id,omitempty"`
 	Name      sql.NullString `db:"name" json:"name,omitempty"`
 	ShortName sql.NullString `db:"short_name" json:"short_name,omitempty"`
+	Updated   time.Time      `db:"updated" json:"updated,omitempty"`
+	Created   time.Time      `db:"created" json:"created,omitempty"`
 }
 
 type Role struct {
@@ -129,12 +150,16 @@ type Role struct {
 	PersonID       int            `db:"person_id" json:"person_id,omitempty"`
 	GroupID        sql.NullInt64  `db:"group_id" json:"group_id,omitempty"`
 	ElectionPeriod sql.NullInt64  `db:"election_period" json:"election_period,omitempty"`
+	Updated        time.Time      `db:"updated" json:"updated,omitempty"`
+	Created        time.Time      `db:"created" json:"created,omitempty"`
 }
 
 type ElectionPeriod struct {
 	Number    int          `db:"number" json:"number"`
 	StartDate sql.NullTime `db:"start_date" json:"start_date,omitempty"`
 	EndDate   sql.NullTime `db:"end_date" json:"end_date,omitempty"`
+	Updated   time.Time    `db:"updated" json:"updated,omitempty"`
+	Created   time.Time    `db:"created" json:"created,omitempty"`
 }
 
 type IngestionStatus string
@@ -149,23 +174,6 @@ type IngestionLog struct {
 	Timestamp    time.Time       `db:"timestamp" json:"timestamp,omitempty"`
 	Status       IngestionStatus `db:"status" json:"status,omitempty"`
 	ErrorMessage sql.NullString  `db:"error_message" json:"error_message,omitempty"`
-}
-
-type LogStatus string
-
-const (
-	Debug LogStatus = "debug"
-	Info  LogStatus = "info"
-	Warn  LogStatus = "warn"
-	Error LogStatus = "error"
-	Fatal LogStatus = "fatal"
-)
-
-type Log struct {
-	ID        int       `db:"id" json:"id,omitempty"`
-	Timestamp time.Time `db:"timestamp" json:"timestamp,omitempty"`
-	Status    LogStatus `db:"status" json:"status,omitempty"`
-	Message   string    `db:"message" json:"message,omitempty"`
 }
 
 // TODO: Split protocol parts

@@ -7,6 +7,16 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+type LogStatus int
+
+const (
+	Debug LogStatus = iota
+	Info
+	Warn
+	Error
+	Fatal
+)
+
 type Logger struct {
 	db               *sqlx.DB
 	minConsoleLevel  LogStatus
@@ -29,7 +39,7 @@ func (l *Logger) Debug(message string) {
 		fmt.Println("DEBUG: ", message)
 	}
 	if l.minDatabaseLevel <= Debug {
-		l.Log(Debug, message)
+		l.Log("debug", message)
 	}
 }
 
@@ -38,7 +48,7 @@ func (l *Logger) Info(message string) {
 		fmt.Println("INFO: ", message)
 	}
 	if l.minDatabaseLevel <= Info {
-		l.Log(Info, message)
+		l.Log("info", message)
 	}
 }
 
@@ -47,7 +57,7 @@ func (l *Logger) Warn(message string) {
 		fmt.Println("WARN: ", message)
 	}
 	if l.minDatabaseLevel <= Warn {
-		l.Log(Warn, message)
+		l.Log("warn", message)
 	}
 }
 
@@ -56,20 +66,21 @@ func (l *Logger) Error(message string) {
 		fmt.Println("ERROR: ", message)
 	}
 	if l.minDatabaseLevel <= Error {
-		l.Log(Error, message)
+		l.Log("error", message)
 	}
 }
 
 func (l *Logger) Fatal(message string) {
 	if l.minDatabaseLevel <= Fatal {
-		l.Log(Fatal, message)
+		l.Log("fatal", message)
 	}
 	if l.minConsoleLevel <= Fatal {
 		fmt.Println("FATAL: ", message)
+		panic(message)
 	}
 }
 
-func (l *Logger) Log(status LogStatus, message string) {
+func (l *Logger) Log(status string, message string) {
 	_, err := l.db.Exec("INSERT INTO logs (timestamp, status, message) VALUES (NOW(), $1, $2)", status, message)
 	if err != nil {
 		log.Printf("ERROR:Failed to write log to database: %v", err)
