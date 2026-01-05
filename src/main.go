@@ -42,14 +42,28 @@ func main() {
 	})
 
 	http.HandleFunc("/ingest", func(w http.ResponseWriter, r *http.Request) {
-		reinitializeApiData := r.URL.Query().Get("reinitializeApiData") == "true"
-		reinitializeNewerThan, err := time.Parse(time.RFC3339, r.URL.Query().Get("reinitializeNewerThan"))
+		reinitializeActivities := r.URL.Query().Get("reinitializeActivities") == "true"
+		reinitializeEntities := r.URL.Query().Get("reinitializeEntities") == "true"
+		reinitializeNewerThanPar := r.URL.Query().Get("reinitializeNewerThan")
+
+		var reinitializeNewerThan *time.Time = nil
+		var reinitParsed time.Time = time.Time{}
+
+		if reinitializeNewerThanPar != "" {
+			reinitParsed, err = time.Parse(time.RFC3339, reinitializeNewerThanPar)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, "Failed to parse reinitializeNewerThan", err)
+				return
+			}
+			reinitializeNewerThan = &reinitParsed
+		}
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprint(w, "Failed to parse reinitializeNewerThan", err)
 			return
 		}
-		err = ingestData(reinitializeApiData, &reinitializeNewerThan)
+		err = ingestData(reinitializeActivities, reinitializeEntities, reinitializeNewerThan)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprint(w, "Failed to ingest data")

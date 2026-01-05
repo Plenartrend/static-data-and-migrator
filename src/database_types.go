@@ -78,7 +78,7 @@ type PrintedPaper struct {
 	Title          string       `db:"title" json:"title,omitempty"`
 	DocumentNumber string       `db:"document_number" json:"document_number,omitempty"`
 	Publisher      Body         `db:"publisher" json:"publisher,omitempty"`
-	GroupID        int          `db:"group_id" json:"group_id,omitempty"`
+	GroupID        sql.NullInt64 `db:"group_id" json:"group_id,omitempty"`
 	URL            string       `db:"url" json:"url,omitempty"`
 	Text           string       `db:"text" json:"text,omitempty"`
 	ElectionPeriod int          `db:"election_period" json:"election_period,omitempty"`
@@ -122,6 +122,7 @@ type Activity struct {
 	PrintedPaperID sql.NullInt64 `db:"printed_paper_id" json:"printed_paper_id,omitempty"`
 	ProtocolID     sql.NullInt64 `db:"protocol_id" json:"protocol_id,omitempty"`
 	Text           string        `db:"text" json:"text,omitempty"`
+	APIUpdated     time.Time     `db:"api_updated" json:"api_updated,omitempty"`
 	Updated        time.Time     `db:"updated" json:"updated,omitempty"`
 	Created        time.Time     `db:"created" json:"created,omitempty"`
 }

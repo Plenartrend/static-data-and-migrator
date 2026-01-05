@@ -54,7 +54,7 @@ CREATE TABLE roles (
    academic_title TEXT,
    last_name TEXT NOT NULL,
    first_name TEXT NOT NULL,
-   person_id INTEGER NOT NULL REFERENCES persons(id),
+   person_id INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
    group_id INTEGER REFERENCES parliamentary_groups(id),
    election_period INTEGER REFERENCES election_periods(number),
    updated TIMESTAMP,
@@ -126,7 +126,7 @@ CREATE TABLE printed_papers (
 -- Printed paper signers junction table
 CREATE TABLE printed_paper_signers (
     printed_paper_id INTEGER NOT NULL REFERENCES printed_papers(id) ON DELETE CASCADE,
-    role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE, --Watch out when deleting roles: signer data will be lost!
     PRIMARY KEY (printed_paper_id, role_id),
     updated TIMESTAMP,
     created TIMESTAMP
@@ -153,11 +153,12 @@ CREATE TABLE protocols (
 CREATE TABLE activities (
     id INTEGER PRIMARY KEY,
     type TEXT,
-    role_id INTEGER NOT NULL REFERENCES roles(id),
+    role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE, --Watch out when deleting roles: activity data will be lost!
     document_type document_type,
-    printed_paper_id INTEGER REFERENCES printed_papers(id),
-    protocol_id INTEGER REFERENCES protocols(id),
+    printed_paper_id INTEGER REFERENCES printed_papers(id) ON DELETE CASCADE, --Watch out when deleting printed papers: activity data will be lost!
+    protocol_id INTEGER REFERENCES protocols(id) ON DELETE CASCADE, --Watch out when deleting protocols: activity data will be lost!
     text TEXT,
+    api_updated TIMESTAMP,
     updated TIMESTAMP,
     created TIMESTAMP,
     -- Ensure activity references either a printed paper or a protocol (or neither), but maintains consistency
