@@ -7,12 +7,16 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	dip "plenartrend/static-data-and-migrator/src/openAPI"
 
 	"github.com/jmoiron/sqlx"
 )
+
+const requestTimeout = 50 * time.Millisecond
+const ingestionSleepTime = 1 * time.Second
 
 // DBInterface allows using either *sqlx.DB or *sqlx.Tx
 type DBInterface interface {
@@ -22,46 +26,22 @@ type DBInterface interface {
 	QueryRow(query string, args ...interface{}) *sql.Row
 }
 
-// setRole sets a role in the database and logs a warning if it already exists. This happens because of low quality data in the API.
-func setRole(db DBInterface, personID string, name string, lastName string, firstName string, electionPeriod int, groupID *int, logger *Logger) error {
-	var exists bool
-	err := db.Get(&exists, `
-		SELECT EXISTS(
-			SELECT 1 FROM roles 
-			WHERE person_id = $1 AND election_period = $2 AND name = $3
-		)
-	`, personID, electionPeriod, name)
-	if err != nil {
-		return fmt.Errorf("check role existence: %w", err)
-	}
+var ingestionWG sync.WaitGroup
 
-	if exists {
-		logger.Info(fmt.Sprintf("skipping duplicate role for person %s, election period %d", personID, electionPeriod))
-		return nil
-	}
+var ingestionsTasks = make(chan func())
 
-	_, err = db.Exec("INSERT INTO roles (person_id, name, last_name, first_name, election_period, group_id) VALUES ($1, $2, $3, $4, $5, $6)",
-		personID, name, lastName, firstName, electionPeriod, groupID)
-	if err != nil {
-		return fmt.Errorf("insert role: %w", err)
-	}
-	return nil
+func init() {
+	go func() {
+		for task := range ingestionsTasks {
+			task()
+			ingestionWG.Done()
+		}
+	}()
 }
 
-func getLastSuccessTimestamp(db DBInterface, logger *Logger) (time.Time, error) {
-	var lastSuccessTimestamp time.Time
-	err := db.Get(&lastSuccessTimestamp, "SELECT l.timestamp FROM ingestion_logs l WHERE l.status = 'success' ORDER BY l.timestamp DESC LIMIT 1")
-	if err == sql.ErrNoRows {
-		lastSuccessTimestamp = time.Date(2026, 01, 01, 0, 0, 0, 0, time.UTC) //TODO: In prod this is emoty (minimal) date
-	} else if err != nil {
-		logger.Error(fmt.Sprintf("Failed to query last success timestamp: %v", err))
-		return time.Time{}, fmt.Errorf("failed to query last success timestamp: %w", err)
-	}
-	return lastSuccessTimestamp, nil
-}
-
-func getAllPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, logger *Logger) ([]dip.Person, error) {
-	var persons = make(map[string]dip.Person)
+func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) ([]dip.Person, error) {
+	logger.Debug("Ingesting persons")
+	var count = 0
 	var cursor *string
 
 	for {
@@ -71,80 +51,36 @@ func getAllPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 			Cursor:             cursor,
 		})
 		if err != nil {
-			logger.Error(fmt.Sprintf("failed to get person list: %v", err))
-			return nil, fmt.Errorf("failed to get person list: %w", err)
+			logger.Error(fmt.Sprintf("failed to ingest persons: %v", err))
+			return nil, fmt.Errorf("failed to ingest persons: %w", err)
 		}
 		if resp.JSON200 == nil {
 			logger.Error(fmt.Sprintf("unexpected response: %v", resp))
 			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
-		for _, p := range resp.JSON200.Documents {
-			persons[p.Id] = p
+		// Capture documents in closure for parallel ingestion
+		documents := resp.JSON200.Documents
+		ingestionWG.Add(1)
+		ingestionsTasks <- func() {
+			err := processPersons(db, documents, logger)
+			if err != nil {
+				logger.Error(fmt.Sprintf("failed to process persons: %v", err))
+			}
 		}
 
-		if int32(len(persons)) >= resp.JSON200.NumFound {
+		count += len(documents)
+		cursor = &resp.JSON200.Cursor
+		logger.Debug(fmt.Sprintf("Got %d persons with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		if int32(count) >= resp.JSON200.NumFound {
 			break
 		}
-		cursor = &resp.JSON200.Cursor
+		time.Sleep(requestTimeout)
 	}
-	return values(persons), nil
+	return nil, nil
 }
 
-func getOrSetElectionPeriod(db DBInterface, number int, logger *Logger) (int, error) {
-	var electionPeriod ElectionPeriod
-	err := db.Get(&electionPeriod, "SELECT number, start_date, end_date FROM election_periods WHERE number = $1", number)
-	if err == sql.ErrNoRows {
-		var newNumber int
-		err = db.QueryRow("INSERT INTO election_periods (number) VALUES ($1) RETURNING number", number).Scan(&newNumber)
-		if err != nil {
-			logger.Error(fmt.Sprintf("failed to insert election period: %v", err))
-			return 0, fmt.Errorf("insert election period: %w", err)
-		}
-		return newNumber, nil
-	} else if err != nil {
-		logger.Error(fmt.Sprintf("failed to get election period: %v", err))
-		return 0, fmt.Errorf("get election period: %w", err)
-	}
-	return electionPeriod.Number, nil
-}
-
-func getOrSetGroupByName(db DBInterface, shortName *string, name *string, logger *Logger) (int, error) {
-	var group ParliamentaryGroup
-	err := db.Get(&group, "SELECT id, name, short_name FROM parliamentary_groups WHERE short_name = $1 OR name = $2", shortName, name)
-
-	if err == sql.ErrNoRows {
-		var id int
-		if err := db.QueryRow("INSERT INTO parliamentary_groups (name, short_name) VALUES ($1, $2) RETURNING id", name, shortName).Scan(&id); err != nil {
-			logger.Error(fmt.Sprintf("failed to insert group: %v", err))
-			return 0, fmt.Errorf("insert group: %w", err)
-		}
-		return id, nil
-	}
-	if err != nil {
-		logger.Error(fmt.Sprintf("failed to get group: %v", err))
-		return 0, fmt.Errorf("get group: %w", err)
-	}
-
-	// Update if either column is missing
-	if (shortName != nil && !group.ShortName.Valid) || (name != nil && !group.Name.Valid) {
-		newName := group.Name.String
-		newShort := group.ShortName.String
-		if name != nil && !group.Name.Valid {
-			newName = *name
-		}
-		if shortName != nil && !group.ShortName.Valid {
-			newShort = *shortName
-		}
-		if _, err := db.Exec("UPDATE parliamentary_groups SET name = $1, short_name = $2 WHERE id = $3", newName, newShort, group.ID); err != nil {
-			logger.Error(fmt.Sprintf("failed to update group: %v", err))
-			return 0, fmt.Errorf("update group: %w", err)
-		}
-	}
-	return group.ID, nil
-}
-
-func ingestPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
+func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
 	for _, p := range persons {
 		_, err := db.Exec("INSERT INTO persons (id, api_updated) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET api_updated = $2", p.Id, p.Aktualisiert)
 		if err != nil {
@@ -227,8 +163,9 @@ func ingestPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
 	return nil
 }
 
-func getProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time) ([]dip.PlenarprotokollText, error) {
-	var protocols = make([]dip.PlenarprotokollText, 0)
+func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) ([]dip.PlenarprotokollText, error) {
+	logger.Debug("Ingesting protocols")
+	var count = 0
 	var cursor *string
 
 	for {
@@ -238,24 +175,34 @@ func getProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.Tim
 			Cursor:             cursor,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to get protocol list: %w", err)
+			return nil, fmt.Errorf("failed to ingest protocols: %w", err)
 		}
 		if resp.JSON200 == nil {
 			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
-		protocols = append(protocols, resp.JSON200.Documents...)
+		// Capture documents in closure for parallel ingestion
+		documents := resp.JSON200.Documents
+		ingestionWG.Add(1)
+		ingestionsTasks <- func() {
+			err := processProtocols(documents, db, logger)
+			if err != nil {
+				logger.Error(fmt.Sprintf("failed to process protocols: %v", err))
+			}
+		}
 
-		if int32(len(protocols)) >= resp.JSON200.NumFound {
+		count += len(documents)
+		cursor = &resp.JSON200.Cursor
+		logger.Debug(fmt.Sprintf("Got %d protocols with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		if int32(count) >= resp.JSON200.NumFound {
 			break
 		}
-		cursor = &resp.JSON200.Cursor
+		time.Sleep(requestTimeout)
 	}
-
-	return protocols, nil
+	return nil, nil
 }
 
-func ingestProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logger *Logger) error {
+func processProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logger *Logger) error {
 	for _, p := range protocols {
 		var exists bool
 		err := db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM protocols WHERE id=$1)", p.Id)
@@ -288,7 +235,7 @@ func ingestProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logger
 				title=$2, document_number=$3, publisher=$4, session_note=$5, url=$6, text=$7, election_period=$8, date=$9,
 				api_updated=$10, is_present=$11
 				WHERE id=$1
-			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum.Time,
+			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
 				p.Aktualisiert, is_present)
 		} else {
 			_, err = db.Exec(`
@@ -298,7 +245,7 @@ func ingestProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logger
 				VALUES
 				($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 				ON CONFLICT (id) DO NOTHING
-			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum.Time,
+			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
 				p.Aktualisiert, is_present)
 		}
 
@@ -310,8 +257,9 @@ func ingestProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logger
 	return nil
 }
 
-func getPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time) ([]dip.DrucksacheText, error) {
-	var printedPapers = make([]dip.DrucksacheText, 0)
+func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) ([]dip.DrucksacheText, error) {
+	logger.Debug("Ingesting printed papers")
+	var count = 0
 	var cursor *string
 
 	for {
@@ -321,24 +269,35 @@ func getPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp time
 			Cursor:             cursor,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to get printed paper list: %w", err)
+			return nil, fmt.Errorf("failed to ingest printed papers: %w", err)
 		}
 		if resp.JSON200 == nil {
 			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
-		printedPapers = append(printedPapers, resp.JSON200.Documents...)
+		// Capture documents in closure for parallel ingestion
+		documents := resp.JSON200.Documents
+		ingestionWG.Add(1)
+		ingestionsTasks <- func() {
+			err := processPrintedPapers(documents, db, logger)
+			if err != nil {
+				logger.Error(fmt.Sprintf("failed to process printed papers: %v", err))
+			}
+		}
 
-		if int32(len(printedPapers)) >= resp.JSON200.NumFound {
+		count += len(documents)
+		cursor = &resp.JSON200.Cursor
+		logger.Debug(fmt.Sprintf("Got %d printed papers with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		if int32(count) >= resp.JSON200.NumFound {
 			break
 		}
-		cursor = &resp.JSON200.Cursor
+		time.Sleep(requestTimeout)
 	}
 
-	return printedPapers, nil
+	return nil, nil
 }
 
-func ingestPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, logger *Logger) error {
+func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, logger *Logger) error {
 	for _, p := range printedPapers {
 		var exists bool
 		err := db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM plenartrend.printed_papers WHERE id=$1)", p.Id)
@@ -376,7 +335,7 @@ func ingestPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, log
 				type=$2, title=$3, document_number=$4, publisher=$5, group_id=$6, url=$7, text=$8, election_period=$9, date=$10,
 				api_updated=$11, passed_date=$12, active_date=$13, is_present=$14
 				WHERE id=$1
-			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum.Time,
+			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
 				p.Aktualisiert, passedDate, activeDate, is_present)
 		} else {
 			_, err = db.Exec(`
@@ -385,7 +344,7 @@ func ingestPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, log
 				VALUES
 				($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 				ON CONFLICT (id) DO NOTHING
-			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, p.Text, electionPeriod, p.Datum.Time,
+			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
 				p.Aktualisiert, passedDate, activeDate, is_present)
 		}
 
@@ -423,8 +382,9 @@ func ingestPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, log
 	return nil
 }
 
-func getActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time) ([]dip.Aktivitaet, error) {
-	var activities = make([]dip.Aktivitaet, 0)
+func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) ([]dip.Aktivitaet, error) {
+	logger.Debug("Ingesting activities")
+	var count = 0
 	var cursor *string
 
 	for {
@@ -434,23 +394,35 @@ func getActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 			Cursor:             cursor,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to get activity list: %w", err)
+			return nil, fmt.Errorf("failed to ingest activities: %w", err)
 		}
 		if resp.JSON200 == nil {
 			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
-		activities = append(activities, resp.JSON200.Documents...)
+		// Capture documents in closure for parallel ingestion
+		documents := resp.JSON200.Documents
+		ingestionWG.Add(1)
+		ingestionsTasks <- func() {
+			err := processActivities(documents, db, logger)
+			if err != nil {
+				logger.Error(fmt.Sprintf("failed to process activities: %v", err))
+			}
+		}
 
-		if int32(len(activities)) >= resp.JSON200.NumFound {
+		count += len(documents)
+		cursor = &resp.JSON200.Cursor
+		logger.Debug(fmt.Sprintf("Got %d activities with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		if int32(count) >= resp.JSON200.NumFound {
 			break
 		}
-		cursor = &resp.JSON200.Cursor
+		time.Sleep(requestTimeout)
 	}
-	return activities, nil
+	return nil, nil
 }
 
-func ingestActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logger) error {
+func processActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logger) error {
+	logger.Debug(fmt.Sprintf("processing %d activities", len(activities)))
 	for _, a := range activities {
 		var exists bool
 		err := db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM plenartrend.activities WHERE id=$1)", a.Id)
@@ -504,19 +476,20 @@ func ingestActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logge
 		var text string = "" // TODO what is the text of the activity?
 
 		if exists {
+			logger.Debug(fmt.Sprintf("updating activity %s", a.Id))
+			_, err = db.Exec(`
+				UPDATE activities
+				SET
+				type=$2, role_id=$3, document_type=$4, printed_paper_id=$5, protocol_id=$6, text=$7, api_updated=$8
+				WHERE id=$1
+			`, a.Id, a.Typ, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
+		} else {
 			_, err = db.Exec(`
 				INSERT INTO activities
 				(id, type, role_id, document_type, printed_paper_id, protocol_id, text, api_updated)
 				VALUES
 				($1, $2, $3, $4, $5, $6, $7, $8)
 				ON CONFLICT (id) DO NOTHING
-			`, a.Id, a.Typ, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
-		} else {
-			_, err = db.Exec(`
-				UPDATE activities
-				SET
-				type=$2, role_id=$3, document_type=$4, printed_paper_id=$5, protocol_id=$6, text=$7, api_updated=$8
-				WHERE id=$1
 			`, a.Id, a.Typ, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
 		}
 
@@ -525,41 +498,6 @@ func ingestActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logge
 		}
 	}
 
-	return nil
-}
-
-func clearActivitiesDatabase(reinitializeNewerThan *time.Time, db DBInterface, logger *Logger) error {
-	// Delete in correct order (children first due to foreign keys)
-	newerThanString := ""
-	if reinitializeNewerThan != nil {
-		newerThanString = fmt.Sprintf("WHERE api_updated >= '%s'", reinitializeNewerThan.Format("2006-01-02 15:04:05"))
-	}
-	if _, err := db.Exec(fmt.Sprintf("DELETE FROM protocols %s", newerThanString)); err != nil {
-		logger.Error(fmt.Sprintf("failed to delete protocols: %v", err))
-		return fmt.Errorf("delete protocols: %w", err)
-	}
-	if _, err := db.Exec(fmt.Sprintf("DELETE FROM printed_papers %s", newerThanString)); err != nil {
-		logger.Error(fmt.Sprintf("failed to delete printed_papers: %v", err))
-		return fmt.Errorf("delete printed_papers: %w", err)
-	}
-	if _, err := db.Exec(fmt.Sprintf("DELETE FROM activities %s", newerThanString)); err != nil {
-		logger.Error(fmt.Sprintf("failed to delete activities: %v", err))
-		return fmt.Errorf("delete activities: %w", err)
-	}
-	logger.Info("Cleared existing text data")
-	return nil
-}
-
-func clearEntitiesDatabase(reinitializeNewerThan *time.Time, db DBInterface, logger *Logger) error {
-	newerThanString := ""
-	if reinitializeNewerThan != nil {
-		newerThanString = fmt.Sprintf("WHERE api_updated >= '%s'", reinitializeNewerThan.Format("2006-01-02 15:04:05"))
-	}
-	if _, err := db.Exec(fmt.Sprintf("DELETE FROM persons %s", newerThanString)); err != nil {
-		logger.Error(fmt.Sprintf("failed to delete persons: %v", err))
-		return fmt.Errorf("delete persons: %w", err)
-	}
-	logger.Info("Cleared existing entities data")
 	return nil
 }
 
@@ -572,7 +510,8 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 	defer db.Close()
 
 	// Logger uses db connection (not transaction) so logs always commit even if transaction rolls back
-	logger := NewLogger(db, nil, nil)
+	consoleDebugLevel := Debug
+	logger := NewLogger(db, &consoleDebugLevel, nil)
 
 	// Local helper to log errors to ingestion_logs
 	logIngestionError := func(err error) {
@@ -651,88 +590,68 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 		}
 	}
 
+	//------Ingestion Begins------//
+
 	if reinitializeEntities || !reinitializeData {
-		logger.Info(fmt.Sprintf("getting persons"))
+		logger.Info(fmt.Sprintf("ingesting persons"))
 
-		persons, err := getAllPersons(client, lastSuccessTimestamp, currentTimestamp, logger)
+		_, err = ingestPersons(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
 			logIngestionError(err)
 			txErr = err
 			return err
 		}
 
-		logger.Info(fmt.Sprintf("ingesting %d persons", len(persons)))
+		logger.Debug("Waiting for all person ingestion tasks to complete...")
+		ingestionWG.Wait()
+		logger.Info("All person ingestion tasks completed")
 
-		err = ingestPersons(tx, persons, logger)
-		if err != nil {
-			logIngestionError(err)
-			txErr = err
-			return err
-		}
-		logger.Info(fmt.Sprintf("successfully ingested %d persons", len(persons)))
+		time.Sleep(ingestionSleepTime)
 	}
 
 	if reinitializeActivities || !reinitializeData {
-		logger.Info(fmt.Sprintf("getting protocols"))
+		logger.Info(fmt.Sprintf("ingesting protocols"))
 
-		protocols, err := getProtocols(client, lastSuccessTimestamp, currentTimestamp)
+		_, err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
 			logIngestionError(err)
 			txErr = err
 			return err
 		}
 
-		logger.Info(fmt.Sprintf("ingesting %d protocols", len(protocols)))
+		logger.Debug("Waiting for all protocol ingestion tasks to complete...")
+		ingestionWG.Wait()
+		logger.Info("All protocol ingestion tasks completed")
 
-		err = ingestProtocols(protocols, tx, logger)
-		if err != nil {
-			logIngestionError(err)
-			logger.Error(fmt.Sprintf("failed to ingest protocols: %v", err))
-			txErr = err
-			return err
-		}
-		logger.Info(fmt.Sprintf("successfully ingested %d protocols", len(protocols)))
+		time.Sleep(ingestionSleepTime)
 
-		logger.Info(fmt.Sprintf("getting printed papers"))
+		logger.Info(fmt.Sprintf("ingesting printed papers"))
 
-		printedPapers, err := getPrintedPapers(client, lastSuccessTimestamp, currentTimestamp)
+		_, err = ingestPrintedPapers(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
 			logIngestionError(err)
 			txErr = err
 			return err
 		}
 
-		logger.Info(fmt.Sprintf("ingesting %d printed papers", len(printedPapers)))
+		logger.Debug("Waiting for all printed paper ingestion tasks to complete...")
+		ingestionWG.Wait()
+		logger.Info("All printed paper ingestion tasks completed")
 
-		err = ingestPrintedPapers(printedPapers, tx, logger)
-		if err != nil {
-			logIngestionError(err)
-			logger.Error(fmt.Sprintf("failed to ingest printed papers: %v", err))
-			txErr = err
-			return err
-		}
+		time.Sleep(ingestionSleepTime)
 
-		logger.Info(fmt.Sprintf("successfully ingested %d printed papers", len(printedPapers)))
+		logger.Info(fmt.Sprintf("ingesting activities"))
 
-		logger.Info(fmt.Sprintf("getting activities"))
-
-		activities, err := getActivities(client, lastSuccessTimestamp, currentTimestamp)
+		_, err = ingestActivities(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
 			logIngestionError(err)
 			txErr = err
 			return err
 		}
 
-		logger.Info(fmt.Sprintf("ingesting %d activities", len(activities)))
-
-		err = ingestActivities(activities, tx, logger)
-		if err != nil {
-			logIngestionError(err)
-			logger.Error(fmt.Sprintf("failed to ingest activities: %v", err))
-			txErr = err
-			return err
-		}
-		logger.Info(fmt.Sprintf("successfully ingested %d activities", len(activities)))
+		logger.Debug("Waiting for all activity ingestion tasks to complete...")
+		ingestionWG.Wait()
+		logger.Info("All activity ingestion tasks completed")
 	}
 
 	_, err = tx.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES (NOW(), 'success')")

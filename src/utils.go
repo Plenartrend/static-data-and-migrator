@@ -1,6 +1,10 @@
 package main
 
-import "github.com/lib/pq"
+import (
+	"strings"
+
+	"github.com/lib/pq"
+)
 
 // Helper to get values from a map
 func values[K comparable, V any](m map[K]V) []V {
@@ -17,4 +21,17 @@ func isUniqueViolation(err error) bool {
 		return pqErr.Code == "23505" // unique_violation
 	}
 	return false
+}
+
+// sanitizeString removes null bytes (0x00) from strings, which PostgreSQL doesn't allow in UTF-8
+func sanitizeString(s string) string {
+	return strings.ReplaceAll(s, "\x00", "")
+}
+
+func sanitizeStringPtr(s *string) *string {
+	if s == nil {
+		return nil
+	}
+	sanitized := sanitizeString(*s)
+	return &sanitized
 }
