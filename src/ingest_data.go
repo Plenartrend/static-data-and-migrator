@@ -54,11 +54,9 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 			Cursor:             cursor,
 		})
 		if err != nil {
-			logger.Error(fmt.Sprintf("failed to ingest persons: %v", err))
 			return nil, fmt.Errorf("failed to ingest persons: %w", err)
 		}
 		if resp.JSON200 == nil {
-			logger.Error(fmt.Sprintf("unexpected response: %v", resp))
 			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
@@ -87,17 +85,14 @@ func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error 
 	for _, p := range persons {
 		_, err := db.Exec("INSERT INTO persons (id, api_updated) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET api_updated = $2", p.Id, p.Aktualisiert)
 		if err != nil {
-			logger.Error(fmt.Sprintf("failed to insert person: %v", err))
 			return fmt.Errorf("insert person %s: %w", p.Id, err)
 		}
 
 		// ----Validate required fields----
 		if len(p.Funktion) != 1 {
-			logger.Error(fmt.Sprintf("person %s: expected 1 Funktion, got %d", p.Id, len(p.Funktion)))
 			return fmt.Errorf("person %s: expected 1 Funktion, got %d", p.Id, len(p.Funktion))
 		}
 		if p.Fraktion != nil && len(*p.Fraktion) > 1 {
-			logger.Error(fmt.Sprintf("person %s: expected at most 1 Fraktion, got %d", p.Id, len(*p.Fraktion)))
 			return fmt.Errorf("person %s: expected at most 1 Fraktion, got %d", p.Id, len(*p.Fraktion))
 		}
 		// ---End of validate required fields----
@@ -107,7 +102,6 @@ func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error 
 			fraktion := (*p.Fraktion)[0]
 			id, err := getOrSetGroupByName(db, nil, &fraktion, logger)
 			if err != nil {
-				logger.Error(fmt.Sprintf("failed to get group for person %s: %v", p.Id, err))
 				return fmt.Errorf("get group for person %s: %w", p.Id, err)
 			}
 			groupId = &id
@@ -207,12 +201,6 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 
 func processProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logger *Logger) error {
 	for _, p := range protocols {
-		var exists bool
-		err := db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM protocols WHERE id=$1)", p.Id)
-		if err != nil {
-			return fmt.Errorf("error checking existence of protocol %s: %w", p.Id, err)
-		}
-
 		var publisher Body
 		if IsValidBody(string(p.Herausgeber)) {
 			publisher = Body(p.Herausgeber)
@@ -231,26 +219,15 @@ func processProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logge
 
 		is_present := p.Text != nil && *p.Text != "" // TODO do we really need this? We need to update it anyway in case anything has changed.
 
-		if exists {
-			_, err = db.Exec(`
-				UPDATE protocols
-				SET
-				title=$2, document_number=$3, publisher=$4, session_note=$5, url=$6, text=$7, election_period=$8, date=$9,
-				api_updated=$10, is_present=$11
-				WHERE id=$1
-			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
-				p.Aktualisiert, is_present)
-		} else {
-			_, err = db.Exec(`
-				INSERT
-				INTO protocols
-				(id, title, document_number, publisher, session_note, url, text, election_period, date, api_updated, is_present)
-				VALUES
-				($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-				ON CONFLICT (id) DO NOTHING
-			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
-				p.Aktualisiert, is_present)
-		}
+		_, err := db.Exec(`
+			INSERT INTO protocols
+			(id, title, document_number, publisher, session_note, url, text, election_period, date, api_updated, is_present)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			ON CONFLICT (id) DO UPDATE SET
+				title = $2, document_number = $3, publisher = $4, session_note = $5, url = $6, text = $7, election_period = $8, date = $9,
+				api_updated = $10, is_present = $11
+		`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
+			p.Aktualisiert, is_present)
 
 		if err != nil {
 			return fmt.Errorf("failed to insert protocol %s: %w", p.Id, err)
@@ -302,12 +279,6 @@ func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp t
 
 func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, logger *Logger) error {
 	for _, p := range printedPapers {
-		var exists bool
-		err := db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM plenartrend.printed_papers WHERE id=$1)", p.Id)
-		if err != nil {
-			return fmt.Errorf("error checking existence of printed paper %s: %w", p.Id, err)
-		}
-
 		electionPeriod, err := getOrSetElectionPeriod(db, int(*p.Wahlperiode), logger)
 		if err != nil {
 			return fmt.Errorf("error getting/setting election period for protocol %s: %w", p.Id, err)
@@ -331,25 +302,15 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 		var activeDate sql.NullTime                          // TODO how do we get this information? //It seems using the connected process
 		var is_present bool = p.Text != nil && *p.Text != "" // TODO do we really need this? We need to update it anyway in case anything has changed.
 
-		if exists {
-			_, err = db.Exec(`
-				UPDATE printed_papers
-				SET
-				type=$2, title=$3, document_number=$4, publisher=$5, group_id=$6, url=$7, text=$8, election_period=$9, date=$10,
-				api_updated=$11, passed_date=$12, active_date=$13, is_present=$14
-				WHERE id=$1
-			`, p.Id, p.Drucksachetyp, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
-				p.Aktualisiert, passedDate, activeDate, is_present)
-		} else {
-			_, err = db.Exec(`
-				INSERT INTO printed_papers
-				(id, type, title, document_number, publisher, group_id, url, text, election_period, date, api_updated, passed_date, active_date, is_present)
-				VALUES
-				($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-				ON CONFLICT (id) DO NOTHING
-			`, p.Id, p.Drucksachetyp, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
-				p.Aktualisiert, passedDate, activeDate, is_present)
-		}
+		_, err = db.Exec(`
+			INSERT INTO printed_papers
+			(id, type, title, document_number, publisher, group_id, url, text, election_period, date, api_updated, passed_date, active_date, is_present)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			ON CONFLICT (id) DO UPDATE SET
+				type = $2, title = $3, document_number = $4, publisher = $5, group_id = $6, url = $7, text = $8, election_period = $9, date = $10,
+				api_updated = $11, passed_date = $12, active_date = $13, is_present = $14
+		`, p.Id, p.Drucksachetyp, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
+			p.Aktualisiert, passedDate, activeDate, is_present)
 
 		if err != nil {
 			return fmt.Errorf("failed to insert printed paper %s: %w", p.Id, err)
@@ -427,12 +388,6 @@ func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time
 func processActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logger) error {
 	logger.Debug(fmt.Sprintf("processing %d activities", len(activities)))
 	for _, a := range activities {
-		var exists bool
-		err := db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM plenartrend.activities WHERE id=$1)", a.Id)
-		if err != nil {
-			return fmt.Errorf("error checking existence of activity %s: %w", a.Id, err)
-		}
-
 		electionPeriod, err := getOrSetElectionPeriod(db, int(a.Wahlperiode), logger)
 		if err != nil {
 			return fmt.Errorf("error getting/setting election period for activity %s: %w", a.Id, err)
@@ -478,23 +433,13 @@ func processActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logg
 
 		var text string = "" // TODO what is the text of the activity?
 
-		if exists {
-			logger.Debug(fmt.Sprintf("updating activity %s", a.Id))
-			_, err = db.Exec(`
-				UPDATE activities
-				SET
-				type=$2, role_id=$3, document_type=$4, printed_paper_id=$5, protocol_id=$6, text=$7, api_updated=$8
-				WHERE id=$1
-			`, a.Id, a.Aktivitaetsart, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
-		} else {
-			_, err = db.Exec(`
-				INSERT INTO activities
-				(id, type, role_id, document_type, printed_paper_id, protocol_id, text, api_updated)
-				VALUES
-				($1, $2, $3, $4, $5, $6, $7, $8)
-				ON CONFLICT (id) DO NOTHING
-			`, a.Id, a.Aktivitaetsart, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
-		}
+		_, err = db.Exec(`
+			INSERT INTO activities
+			(id, type, role_id, document_type, printed_paper_id, protocol_id, text, api_updated)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (id) DO UPDATE SET
+				type = $2, role_id = $3, document_type = $4, printed_paper_id = $5, protocol_id = $6, text = $7, api_updated = $8
+		`, a.Id, a.Aktivitaetsart, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
 
 		if err != nil {
 			return fmt.Errorf("failed to insert activity %s: %w", a.Id, err)
@@ -518,11 +463,9 @@ func ingestProcesses(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 		})
 		logger.Debug(fmt.Sprintf("fetched first process of total %d", resp.JSON200.NumFound))
 		if err != nil {
-			logger.Error(fmt.Sprintf("failed to ingest processes: %v", err))
 			return nil, fmt.Errorf("failed to ingest processes: %w", err)
 		}
 		if resp.JSON200 == nil {
-			logger.Error(fmt.Sprintf("unexpected response: %v", resp))
 			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
@@ -556,9 +499,13 @@ func processProcesses(processes []dip.Vorgang, db DBInterface, logger *Logger) e
 		if p.Sachgebiet != nil {
 			keywords = pq.Array(*p.Sachgebiet)
 		}
+		date := sql.NullTime{Valid: false}
+		if p.Datum != nil {
+			date = sql.NullTime{Time: p.Datum.Time, Valid: true}
+		}
 		_, err = db.Exec("INSERT INTO processes (id, title, status, summary, keywords, election_period, type, date, api_updated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"+
 			" ON CONFLICT (id) DO UPDATE SET title = $2, status = $3, summary = $4, keywords = $5, election_period = $6, type = $7, date = $8, api_updated = $9",
-			p.Id, p.Titel, p.Beratungsstand, p.Abstract, keywords, electionPeriod, p.Vorgangstyp, p.Datum.Time, p.Aktualisiert)
+			p.Id, p.Titel, p.Beratungsstand, p.Abstract, keywords, electionPeriod, p.Vorgangstyp, date, p.Aktualisiert)
 		if err != nil {
 			return fmt.Errorf("failed to insert process %s: %w", p.Id, err)
 		}
@@ -592,11 +539,9 @@ func ingestProcessPositions(client *dip.ClientWithResponses, lastSuccessTimestam
 		})
 		logger.Debug(fmt.Sprintf("fetched first process position of total %d", resp.JSON200.NumFound))
 		if err != nil {
-			logger.Error(fmt.Sprintf("failed to ingest process positions: %v", err))
 			return nil, fmt.Errorf("failed to ingest process positions: %w", err)
 		}
 		if resp.JSON200 == nil {
-			logger.Error(fmt.Sprintf("unexpected response: %v", resp))
 			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
@@ -648,10 +593,6 @@ func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInter
 				return fmt.Errorf("failed to check existence of protocol %s: %w", p.Fundstelle.Id, err)
 			}
 			if !exists {
-				logger.Warn(fmt.Sprintf("skipping process position %s: protocol %s not found", p.Id, p.Fundstelle.Id))
-				continue
-			}
-			if err != nil {
 				logger.Warn(fmt.Sprintf("skipping process position %s: protocol %s not found", p.Id, p.Fundstelle.Id))
 				continue
 			}
@@ -714,8 +655,8 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 	// Begin transaction
 	tx, err := db.Beginx()
 	if err != nil {
+		err = fmt.Errorf("failed to begin transaction: %w", err)
 		logIngestionError(err)
-		logger.Error(fmt.Sprintf("failed to begin transaction: %v", err))
 		return err
 	}
 	var txErr error
@@ -730,16 +671,16 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 	if reinitializeEntities {
 		err = clearEntitiesDatabase(reinitializeNewerThan, tx, logger)
 		if err != nil {
+			err = fmt.Errorf("failed to clear entities database: %w", err)
 			logIngestionError(err)
-			logger.Error(fmt.Sprintf("failed to clear database: %v", err))
 			return err
 		}
 	}
 	if reinitializeActivities {
 		err = clearActivitiesDatabase(reinitializeNewerThan, tx, logger)
 		if err != nil {
+			err = fmt.Errorf("failed to clear activities database: %w", err)
 			logIngestionError(err)
-			logger.Error(fmt.Sprintf("failed to clear database: %v", err))
 			return err
 		}
 	}
@@ -753,8 +694,8 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 		}),
 	)
 	if err != nil {
+		err = fmt.Errorf("failed to create client: %w", err)
 		logIngestionError(err)
-		logger.Error(fmt.Sprintf("failed to create client: %v", err))
 		return err
 	}
 
@@ -768,6 +709,7 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 		lastSuccessTimestamp, err = getLastSuccessTimestamp(tx, logger)
 		logger.Info(fmt.Sprintf("last success timestamp from database: %s", lastSuccessTimestamp))
 		if err != nil {
+			err = fmt.Errorf("failed to get last success timestamp: %w", err)
 			logIngestionError(err)
 			return err
 		}
@@ -780,6 +722,7 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 
 		_, err = ingestPersons(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
+			err = fmt.Errorf("failed to ingest persons: %w", err)
 			logIngestionError(err)
 			txErr = err
 			return err
@@ -798,6 +741,7 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 
 		_, err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
+			err = fmt.Errorf("failed to ingest protocols: %w", err)
 			logIngestionError(err)
 			txErr = err
 			return err
@@ -813,6 +757,7 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 
 		_, err = ingestPrintedPapers(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
+			err = fmt.Errorf("failed to ingest printed papers: %w", err)
 			logIngestionError(err)
 			txErr = err
 			return err
@@ -828,6 +773,7 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 
 		_, err = ingestProcesses(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
+			err = fmt.Errorf("failed to ingest processes: %w", err)
 			logIngestionError(err)
 			txErr = err
 			return err
@@ -843,6 +789,7 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 
 		_, err = ingestProcessPositions(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
+			err = fmt.Errorf("failed to ingest process positions: %w", err)
 			logIngestionError(err)
 			txErr = err
 			return err
@@ -858,6 +805,7 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 
 		_, err = ingestActivities(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
+			err = fmt.Errorf("failed to ingest activities: %w", err)
 			logIngestionError(err)
 			txErr = err
 			return err
@@ -870,19 +818,18 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 
 	_, err = tx.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES (NOW(), 'success')")
 	if err != nil {
+		err = fmt.Errorf("failed to insert ingestion log: %w", err)
 		logIngestionError(err)
-		logger.Error(fmt.Sprintf("failed to insert ingestion log: %v", err))
 		txErr = err
 		return err
 	}
 
 	// Commit transaction
 	if err = tx.Commit(); err != nil {
+		err = fmt.Errorf("failed to commit transaction: %w", err)
 		logIngestionError(err)
-		logger.Error(fmt.Sprintf("failed to commit transaction: %v", err))
 		txErr = err
 		return err
 	}
-
 	return nil
 }
