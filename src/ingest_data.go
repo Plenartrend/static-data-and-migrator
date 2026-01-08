@@ -16,7 +16,7 @@ import (
 	"github.com/lib/pq"
 )
 
-const requestTimeout = 50 * time.Millisecond
+const requestTimeout = 100 * time.Millisecond
 const ingestionSleepTime = 1 * time.Second
 
 // DBInterface allows using either *sqlx.DB or *sqlx.Tx
@@ -62,6 +62,11 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 
 		// Capture documents in closure for parallel ingestion
 		documents := resp.JSON200.Documents
+
+		if cursor != nil && *cursor == resp.JSON200.Cursor {
+			break
+		}
+
 		ingestionWG.Add(1)
 		ingestionsTasks <- func() {
 			err := processPersons(db, documents, logger)
@@ -73,9 +78,6 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
 		logger.Debug(fmt.Sprintf("Got %d persons with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
-		if int32(count) >= resp.JSON200.NumFound {
-			break
-		}
 		time.Sleep(requestTimeout)
 	}
 	return nil, nil
@@ -180,6 +182,11 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 
 		// Capture documents in closure for parallel ingestion
 		documents := resp.JSON200.Documents
+
+		if cursor != nil && *cursor == resp.JSON200.Cursor {
+			break
+		}
+
 		ingestionWG.Add(1)
 		ingestionsTasks <- func() {
 			err := processProtocols(documents, db, logger)
@@ -191,9 +198,6 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
 		logger.Debug(fmt.Sprintf("Got %d protocols with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
-		if int32(count) >= resp.JSON200.NumFound {
-			break
-		}
 		time.Sleep(requestTimeout)
 	}
 	return nil, nil
@@ -217,17 +221,15 @@ func processProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logge
 			electionPeriod = sql.NullInt32{Int32: int32(ep), Valid: true}
 		}
 
-		is_present := p.Text != nil && *p.Text != "" // TODO do we really need this? We need to update it anyway in case anything has changed.
-
 		_, err := db.Exec(`
 			INSERT INTO protocols
-			(id, title, document_number, publisher, session_note, url, text, election_period, date, api_updated, is_present)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			(id, title, document_number, publisher, session_note, url, text, election_period, date, api_updated)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (id) DO UPDATE SET
 				title = $2, document_number = $3, publisher = $4, session_note = $5, url = $6, text = $7, election_period = $8, date = $9,
-				api_updated = $10, is_present = $11
+				api_updated = $10
 		`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
-			p.Aktualisiert, is_present)
+			p.Aktualisiert)
 
 		if err != nil {
 			return fmt.Errorf("failed to insert protocol %s: %w", p.Id, err)
@@ -257,6 +259,11 @@ func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp t
 
 		// Capture documents in closure for parallel ingestion
 		documents := resp.JSON200.Documents
+
+		if cursor != nil && *cursor == resp.JSON200.Cursor {
+			break
+		}
+
 		ingestionWG.Add(1)
 		ingestionsTasks <- func() {
 			err := processPrintedPapers(documents, db, logger)
@@ -268,9 +275,6 @@ func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp t
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
 		logger.Debug(fmt.Sprintf("Got %d printed papers with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
-		if int32(count) >= resp.JSON200.NumFound {
-			break
-		}
 		time.Sleep(requestTimeout)
 	}
 
@@ -298,19 +302,15 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 			groupId = &gid
 		}
 
-		var passedDate sql.NullTime                          // TODO how do we get this information? //It seems using the connected process
-		var activeDate sql.NullTime                          // TODO how do we get this information? //It seems using the connected process
-		var is_present bool = p.Text != nil && *p.Text != "" // TODO do we really need this? We need to update it anyway in case anything has changed.
-
 		_, err = db.Exec(`
 			INSERT INTO printed_papers
-			(id, type, title, document_number, publisher, group_id, url, text, election_period, date, api_updated, passed_date, active_date, is_present)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			(id, type, title, document_number, publisher, group_id, url, text, election_period, date, api_updated)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			ON CONFLICT (id) DO UPDATE SET
 				type = $2, title = $3, document_number = $4, publisher = $5, group_id = $6, url = $7, text = $8, election_period = $9, date = $10,
-				api_updated = $11, passed_date = $12, active_date = $13, is_present = $14
+				api_updated = $11
 		`, p.Id, p.Drucksachetyp, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
-			p.Aktualisiert, passedDate, activeDate, is_present)
+			p.Aktualisiert)
 
 		if err != nil {
 			return fmt.Errorf("failed to insert printed paper %s: %w", p.Id, err)
@@ -366,6 +366,11 @@ func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time
 
 		// Capture documents in closure for parallel ingestion
 		documents := resp.JSON200.Documents
+
+		if cursor != nil && *cursor == resp.JSON200.Cursor {
+			break
+		}
+
 		ingestionWG.Add(1)
 		ingestionsTasks <- func() {
 			err := processActivities(documents, db, logger)
@@ -377,9 +382,6 @@ func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
 		logger.Debug(fmt.Sprintf("Got %d activities with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
-		if int32(count) >= resp.JSON200.NumFound {
-			break
-		}
 		time.Sleep(requestTimeout)
 	}
 	return nil, nil
@@ -455,13 +457,11 @@ func ingestProcesses(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 	var cursor *string
 
 	for {
-		logger.Debug(fmt.Sprintf("fetching first process"))
 		resp, err := client.GetVorgangListWithResponse(context.Background(), &dip.GetVorgangListParams{
 			FAktualisiertStart: &lastSuccessTimestamp,
 			FAktualisiertEnd:   &currentTimestamp,
 			Cursor:             cursor,
 		})
-		logger.Debug(fmt.Sprintf("fetched first process of total %d", resp.JSON200.NumFound))
 		if err != nil {
 			return nil, fmt.Errorf("failed to ingest processes: %w", err)
 		}
@@ -471,6 +471,11 @@ func ingestProcesses(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 
 		// Capture documents in closure for parallel ingestion
 		documents := resp.JSON200.Documents
+
+		if cursor != nil && *cursor == resp.JSON200.Cursor {
+			break
+		}
+
 		ingestionWG.Add(1)
 		ingestionsTasks <- func() {
 			err := processProcesses(documents, db, logger)
@@ -481,9 +486,6 @@ func ingestProcesses(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
 		logger.Debug(fmt.Sprintf("Got %d processes with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
-		if int32(count) >= resp.JSON200.NumFound {
-			break
-		}
 		time.Sleep(requestTimeout)
 	}
 	return nil, nil
@@ -537,7 +539,6 @@ func ingestProcessPositions(client *dip.ClientWithResponses, lastSuccessTimestam
 			FAktualisiertEnd:   &currentTimestamp,
 			Cursor:             cursor,
 		})
-		logger.Debug(fmt.Sprintf("fetched first process position of total %d", resp.JSON200.NumFound))
 		if err != nil {
 			return nil, fmt.Errorf("failed to ingest process positions: %w", err)
 		}
@@ -547,6 +548,11 @@ func ingestProcessPositions(client *dip.ClientWithResponses, lastSuccessTimestam
 
 		// Capture documents in closure for parallel ingestion
 		documents := resp.JSON200.Documents
+
+		if cursor != nil && *cursor == resp.JSON200.Cursor {
+			break
+		}
+
 		ingestionWG.Add(1)
 		ingestionsTasks <- func() {
 			err := processProcessPositions(documents, db, logger)
@@ -557,9 +563,6 @@ func ingestProcessPositions(client *dip.ClientWithResponses, lastSuccessTimestam
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
 		logger.Debug(fmt.Sprintf("Got %d process positions with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
-		if int32(count) >= resp.JSON200.NumFound {
-			break
-		}
 		time.Sleep(requestTimeout)
 	}
 	return nil, nil
@@ -624,7 +627,6 @@ func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInter
 	return nil
 }
 
-// TODO: I think we use "type" wrong everywhere. We don't want the "type" by the API, but e.g. for activities the "aktivitaetsart"
 func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitializeNewerThan *time.Time) error {
 	reinitializeData := reinitializeActivities || reinitializeEntities
 	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
@@ -816,14 +818,6 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 		logger.Info("All activity ingestion tasks completed")
 	}
 
-	_, err = tx.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES (NOW(), 'success')")
-	if err != nil {
-		err = fmt.Errorf("failed to insert ingestion log: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
 	// Commit transaction
 	if err = tx.Commit(); err != nil {
 		err = fmt.Errorf("failed to commit transaction: %w", err)
@@ -831,5 +825,16 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 		txErr = err
 		return err
 	}
+
+	//TODO: Test this
+	_, err = tx.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES ($1, 'success')", time.Now().UTC())
+	if err != nil {
+		err = fmt.Errorf("failed to insert ingestion log: %w", err)
+		logIngestionError(err)
+		txErr = err
+		return err
+	}
+
+	logger.Info("Ingestion completed successfully")
 	return nil
 }

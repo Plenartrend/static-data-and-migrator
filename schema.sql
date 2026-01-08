@@ -125,9 +125,6 @@ CREATE TABLE printed_papers (
     election_period INTEGER REFERENCES election_periods(number),
     date TIMESTAMP,
     api_updated TIMESTAMP,
-    passed_date TIMESTAMP,
-    active_date TIMESTAMP,
-    is_present BOOLEAN DEFAULT FALSE,
     updated TIMESTAMP,
     created TIMESTAMP
 );
@@ -153,7 +150,6 @@ CREATE TABLE protocols (
     election_period INTEGER REFERENCES election_periods(number),
     date TIMESTAMP,
     api_updated TIMESTAMP,
-    is_present BOOLEAN DEFAULT FALSE,
     updated TIMESTAMP,
     created TIMESTAMP
 );

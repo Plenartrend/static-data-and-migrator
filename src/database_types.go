@@ -92,9 +92,6 @@ type PrintedPaper struct {
 	ElectionPeriod int           `db:"election_period" json:"election_period,omitempty"`
 	Date           time.Time     `db:"date" json:"date,omitempty"`
 	APIUpdated     time.Time     `db:"api_updated" json:"api_updated,omitempty"`
-	PassedDate     sql.NullTime  `db:"passed_date" json:"passed_date,omitempty"`
-	ActiveDate     sql.NullTime  `db:"active_date" json:"active_date,omitempty"`
-	IsPresent      bool          `db:"is_present" json:"is_present,omitempty"`
 	Updated        time.Time     `db:"updated" json:"updated,omitempty"`
 	Created        time.Time     `db:"created" json:"created,omitempty"`
 }
@@ -117,7 +114,6 @@ type Protocol struct {
 	ElectionPeriod int       `db:"election_period" json:"election_period,omitempty"`
 	Date           time.Time `db:"date" json:"date,omitempty"`
 	APIUpdated     time.Time `db:"api_updated" json:"api_updated,omitempty"`
-	IsPresent      bool      `db:"is_present" json:"is_present,omitempty"`
 	Updated        time.Time `db:"updated" json:"updated,omitempty"`
 	Created        time.Time `db:"created" json:"created,omitempty"`
 }
