@@ -827,7 +827,7 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 	}
 
 	//TODO: Test this
-	_, err = tx.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES ($1, 'success')", time.Now().UTC())
+	_, err = db.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES ($1, 'success')", time.Now().UTC())
 	if err != nil {
 		err = fmt.Errorf("failed to insert ingestion log: %w", err)
 		logIngestionError(err)

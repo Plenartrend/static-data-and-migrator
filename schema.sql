@@ -94,24 +94,6 @@ CREATE TABLE process_topics (
     created TIMESTAMP
 );
 
--- Process positions
-CREATE TABLE process_positions (
-    id INTEGER PRIMARY KEY,
-    type TEXT,
-    process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
-    printed_paper_id INTEGER REFERENCES printed_papers(id) ON DELETE CASCADE,
-    protocol_id INTEGER REFERENCES protocols(id) ON DELETE CASCADE,
-    association body,
-    continuation BOOLEAN DEFAULT FALSE,
-    supplement BOOLEAN DEFAULT FALSE,
-    title TEXT,
-    document_type document_type,
-    date TIMESTAMP,
-    api_updated TIMESTAMP,
-    updated TIMESTAMP,
-    created TIMESTAMP
-);
-
 -- Printed papers (Drucksachen)
 CREATE TABLE printed_papers (
     id INTEGER PRIMARY KEY,
@@ -171,6 +153,24 @@ CREATE TABLE activities (
         (document_type = 'printedPaper' AND printed_paper_id IS NOT NULL AND protocol_id IS NULL) OR
         (document_type = 'protocol' AND protocol_id IS NOT NULL AND printed_paper_id IS NULL)
     )
+);
+
+-- Process positions
+CREATE TABLE process_positions (
+    id INTEGER PRIMARY KEY,
+    type TEXT,
+    process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
+    printed_paper_id INTEGER REFERENCES printed_papers(id) ON DELETE CASCADE,
+    protocol_id INTEGER REFERENCES protocols(id) ON DELETE CASCADE,
+    association body,
+    continuation BOOLEAN DEFAULT FALSE,
+    supplement BOOLEAN DEFAULT FALSE,
+    title TEXT,
+    document_type document_type,
+    date TIMESTAMP,
+    api_updated TIMESTAMP,
+    updated TIMESTAMP,
+    created TIMESTAMP
 );
 
 CREATE TABLE ingestion_logs (
