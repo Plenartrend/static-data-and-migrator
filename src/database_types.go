@@ -38,7 +38,6 @@ type Process struct {
 	ID             int       `db:"id" json:"id,omitempty"`
 	Title          string    `db:"title" json:"title,omitempty"`
 	Status         string    `db:"status" json:"status,omitempty"`
-	GroupID        int       `db:"group_id" json:"group_id,omitempty"`
 	Summary        string    `db:"summary" json:"summary,omitempty"`
 	Keywords       []string  `db:"keywords" json:"keywords,omitempty"`
 	ElectionPeriod int       `db:"election_period" json:"election_period,omitempty"`
@@ -56,39 +55,48 @@ type ProcessTopics struct {
 	Created   time.Time `db:"created" json:"created,omitempty"`
 }
 
+type ProcessInitiator struct {
+	ProcessID int       `db:"process_id" json:"process_id,omitempty"`
+	GroupID   int       `db:"group_id" json:"group_id,omitempty"`
+	Updated   time.Time `db:"updated" json:"updated,omitempty"`
+	Created   time.Time `db:"created" json:"created,omitempty"`
+}
+
 // Is this type necessary???
 type ProcessPosition struct {
-	ID           int          `db:"id" json:"id,omitempty"`
-	Type         string       `db:"type" json:"type,omitempty"`
-	ProcessID    int          `db:"process_id" json:"process_id,omitempty"`
-	Association  Body         `db:"association" json:"association,omitempty"`
-	Continuation bool         `db:"continuation" json:"continuation,omitempty"`
-	Supplement   bool         `db:"supplement" json:"supplement,omitempty"`
-	Title        string       `db:"title" json:"title,omitempty"`
-	DocumentType DocumentType `db:"document_type" json:"document_type,omitempty"`
-	Date         time.Time    `db:"date" json:"date,omitempty"`
-	APIUpdated   time.Time    `db:"api_updated" json:"api_updated,omitempty"`
-	Updated      time.Time    `db:"updated" json:"updated,omitempty"`
-	Created      time.Time    `db:"created" json:"created,omitempty"`
+	ID             int           `db:"id" json:"id,omitempty"`
+	Type           string        `db:"type" json:"type,omitempty"`
+	ProcessID      int           `db:"process_id" json:"process_id,omitempty"`
+	PrintedPaperID sql.NullInt64 `db:"printed_paper_id" json:"printed_paper_id,omitempty"`
+	ProtocolID     sql.NullInt64 `db:"protocol_id" json:"protocol_id,omitempty"`
+	Association    Body          `db:"association" json:"association,omitempty"`
+	Continuation   bool          `db:"continuation" json:"continuation,omitempty"`
+	Supplement     bool          `db:"supplement" json:"supplement,omitempty"`
+	Title          string        `db:"title" json:"title,omitempty"`
+	DocumentType   DocumentType  `db:"document_type" json:"document_type,omitempty"`
+	Date           time.Time     `db:"date" json:"date,omitempty"`
+	APIUpdated     time.Time     `db:"api_updated" json:"api_updated,omitempty"`
+	Updated        time.Time     `db:"updated" json:"updated,omitempty"`
+	Created        time.Time     `db:"created" json:"created,omitempty"`
 }
 
 type PrintedPaper struct {
-	ID             int          `db:"id" json:"id,omitempty"`
-	Type           string       `db:"type" json:"type,omitempty"`
-	Title          string       `db:"title" json:"title,omitempty"`
-	DocumentNumber string       `db:"document_number" json:"document_number,omitempty"`
-	Publisher      Body         `db:"publisher" json:"publisher,omitempty"`
+	ID             int           `db:"id" json:"id,omitempty"`
+	Type           string        `db:"type" json:"type,omitempty"`
+	Title          string        `db:"title" json:"title,omitempty"`
+	DocumentNumber string        `db:"document_number" json:"document_number,omitempty"`
+	Publisher      Body          `db:"publisher" json:"publisher,omitempty"`
 	GroupID        sql.NullInt64 `db:"group_id" json:"group_id,omitempty"`
-	URL            string       `db:"url" json:"url,omitempty"`
-	Text           string       `db:"text" json:"text,omitempty"`
-	ElectionPeriod int          `db:"election_period" json:"election_period,omitempty"`
-	Date           time.Time    `db:"date" json:"date,omitempty"`
-	APIUpdated     time.Time    `db:"api_updated" json:"api_updated,omitempty"`
-	PassedDate     sql.NullTime `db:"passed_date" json:"passed_date,omitempty"`
-	ActiveDate     sql.NullTime `db:"active_date" json:"active_date,omitempty"`
-	IsPresent      bool         `db:"is_present" json:"is_present,omitempty"`
-	Updated        time.Time    `db:"updated" json:"updated,omitempty"`
-	Created        time.Time    `db:"created" json:"created,omitempty"`
+	URL            string        `db:"url" json:"url,omitempty"`
+	Text           string        `db:"text" json:"text,omitempty"`
+	ElectionPeriod int           `db:"election_period" json:"election_period,omitempty"`
+	Date           time.Time     `db:"date" json:"date,omitempty"`
+	APIUpdated     time.Time     `db:"api_updated" json:"api_updated,omitempty"`
+	PassedDate     sql.NullTime  `db:"passed_date" json:"passed_date,omitempty"`
+	ActiveDate     sql.NullTime  `db:"active_date" json:"active_date,omitempty"`
+	IsPresent      bool          `db:"is_present" json:"is_present,omitempty"`
+	Updated        time.Time     `db:"updated" json:"updated,omitempty"`
+	Created        time.Time     `db:"created" json:"created,omitempty"`
 }
 
 type PrintedPaperSigner struct {

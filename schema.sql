@@ -67,7 +67,6 @@ CREATE TABLE processes (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
     status TEXT,
-    group_id INTEGER REFERENCES parliamentary_groups(id),
     summary TEXT,
     keywords TEXT[],
     election_period INTEGER REFERENCES election_periods(number),
@@ -76,6 +75,14 @@ CREATE TABLE processes (
     api_updated TIMESTAMP,
     updated TIMESTAMP,
     created TIMESTAMP
+);
+
+CREATE TABLE process_initiators (
+    process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
+    group_id INTEGER NOT NULL REFERENCES parliamentary_groups(id) ON DELETE CASCADE,
+    updated TIMESTAMP,
+    created TIMESTAMP,
+    PRIMARY KEY (process_id, group_id)
 );
 
 -- Process-Topics junction table
@@ -92,6 +99,8 @@ CREATE TABLE process_positions (
     id INTEGER PRIMARY KEY,
     type TEXT,
     process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
+    printed_paper_id INTEGER REFERENCES printed_papers(id) ON DELETE CASCADE,
+    protocol_id INTEGER REFERENCES protocols(id) ON DELETE CASCADE,
     association body,
     continuation BOOLEAN DEFAULT FALSE,
     supplement BOOLEAN DEFAULT FALSE,
@@ -221,6 +230,10 @@ CREATE TRIGGER set_timestamps_roles
 
 CREATE TRIGGER set_timestamps_processes
     BEFORE INSERT OR UPDATE ON processes
+    FOR EACH ROW EXECUTE FUNCTION set_timestamps();
+
+CREATE TRIGGER set_timestamps_process_initiators
+    BEFORE INSERT OR UPDATE ON process_initiators
     FOR EACH ROW EXECUTE FUNCTION set_timestamps();
 
 CREATE TRIGGER set_timestamps_process_topics

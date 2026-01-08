@@ -13,6 +13,7 @@ import (
 	dip "plenartrend/static-data-and-migrator/src/openAPI"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 )
 
 const requestTimeout = 50 * time.Millisecond
@@ -27,16 +28,18 @@ type DBInterface interface {
 }
 
 var ingestionWG sync.WaitGroup
-
 var ingestionsTasks = make(chan func())
+var workerOnce sync.Once
 
-func init() {
-	go func() {
-		for task := range ingestionsTasks {
-			task()
-			ingestionWG.Done()
-		}
-	}()
+func initIngestionWorker() {
+	workerOnce.Do(func() {
+		go func() {
+			for task := range ingestionsTasks {
+				task()
+				ingestionWG.Done()
+			}
+		}()
+	})
 }
 
 func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) ([]dip.Person, error) {
@@ -324,8 +327,8 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 			groupId = &gid
 		}
 
-		var passedDate sql.NullTime                          // TODO how do we get this information?
-		var activeDate sql.NullTime                          // TODO how do we get this information?
+		var passedDate sql.NullTime                          // TODO how do we get this information? //It seems using the connected process
+		var activeDate sql.NullTime                          // TODO how do we get this information? //It seems using the connected process
 		var is_present bool = p.Text != nil && *p.Text != "" // TODO do we really need this? We need to update it anyway in case anything has changed.
 
 		if exists {
@@ -335,7 +338,7 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 				type=$2, title=$3, document_number=$4, publisher=$5, group_id=$6, url=$7, text=$8, election_period=$9, date=$10,
 				api_updated=$11, passed_date=$12, active_date=$13, is_present=$14
 				WHERE id=$1
-			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
+			`, p.Id, p.Drucksachetyp, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
 				p.Aktualisiert, passedDate, activeDate, is_present)
 		} else {
 			_, err = db.Exec(`
@@ -344,7 +347,7 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 				VALUES
 				($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 				ON CONFLICT (id) DO NOTHING
-			`, p.Id, p.Typ, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
+			`, p.Id, p.Drucksachetyp, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
 				p.Aktualisiert, passedDate, activeDate, is_present)
 		}
 
@@ -482,7 +485,7 @@ func processActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logg
 				SET
 				type=$2, role_id=$3, document_type=$4, printed_paper_id=$5, protocol_id=$6, text=$7, api_updated=$8
 				WHERE id=$1
-			`, a.Id, a.Typ, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
+			`, a.Id, a.Aktivitaetsart, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
 		} else {
 			_, err = db.Exec(`
 				INSERT INTO activities
@@ -490,7 +493,7 @@ func processActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logg
 				VALUES
 				($1, $2, $3, $4, $5, $6, $7, $8)
 				ON CONFLICT (id) DO NOTHING
-			`, a.Id, a.Typ, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
+			`, a.Id, a.Aktivitaetsart, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
 		}
 
 		if err != nil {
@@ -501,6 +504,186 @@ func processActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logg
 	return nil
 }
 
+func ingestProcesses(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) ([]dip.Vorgang, error) {
+	logger.Debug("Ingesting processes")
+	var count = 0
+	var cursor *string
+
+	for {
+		logger.Debug(fmt.Sprintf("fetching first process"))
+		resp, err := client.GetVorgangListWithResponse(context.Background(), &dip.GetVorgangListParams{
+			FAktualisiertStart: &lastSuccessTimestamp,
+			FAktualisiertEnd:   &currentTimestamp,
+			Cursor:             cursor,
+		})
+		logger.Debug(fmt.Sprintf("fetched first process of total %d", resp.JSON200.NumFound))
+		if err != nil {
+			logger.Error(fmt.Sprintf("failed to ingest processes: %v", err))
+			return nil, fmt.Errorf("failed to ingest processes: %w", err)
+		}
+		if resp.JSON200 == nil {
+			logger.Error(fmt.Sprintf("unexpected response: %v", resp))
+			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
+		}
+
+		// Capture documents in closure for parallel ingestion
+		documents := resp.JSON200.Documents
+		ingestionWG.Add(1)
+		ingestionsTasks <- func() {
+			err := processProcesses(documents, db, logger)
+			if err != nil {
+				logger.Fatal(fmt.Sprintf("failed to process processes: %v", err))
+			}
+		}
+		count += len(documents)
+		cursor = &resp.JSON200.Cursor
+		logger.Debug(fmt.Sprintf("Got %d processes with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		if int32(count) >= resp.JSON200.NumFound {
+			break
+		}
+		time.Sleep(requestTimeout)
+	}
+	return nil, nil
+}
+
+func processProcesses(processes []dip.Vorgang, db DBInterface, logger *Logger) error {
+	for _, p := range processes {
+		electionPeriod, err := getOrSetElectionPeriod(db, int(p.Wahlperiode), logger)
+		if err != nil {
+			return fmt.Errorf("failed to get or set election period for process %s: %w", p.Id, err)
+		}
+		keywords := pq.Array([]string{})
+		if p.Sachgebiet != nil {
+			keywords = pq.Array(*p.Sachgebiet)
+		}
+		_, err = db.Exec("INSERT INTO processes (id, title, status, summary, keywords, election_period, type, date, api_updated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"+
+			" ON CONFLICT (id) DO UPDATE SET title = $2, status = $3, summary = $4, keywords = $5, election_period = $6, type = $7, date = $8, api_updated = $9",
+			p.Id, p.Titel, p.Beratungsstand, p.Abstract, keywords, electionPeriod, p.Vorgangstyp, p.Datum.Time, p.Aktualisiert)
+		if err != nil {
+			return fmt.Errorf("failed to insert process %s: %w", p.Id, err)
+		}
+		if p.Initiative == nil {
+			continue
+		}
+		for _, initiative := range *p.Initiative {
+			groupId, err := getOrSetGroupByName(db, nil, &initiative, logger) //TODO: This can also be something like "Das Saarland", maybe we should not use "parliamentary_groups" for this?
+			if err != nil {
+				return fmt.Errorf("failed to get or set group for process %s: %w", p.Id, err)
+			}
+			_, err = db.Exec("INSERT INTO process_initiators (process_id, group_id) VALUES ($1, $2) ON CONFLICT (process_id, group_id) DO NOTHING", p.Id, groupId)
+			if err != nil {
+				return fmt.Errorf("failed to insert process initiator for process %s: %w", p.Id, err)
+			}
+		}
+	}
+	return nil
+}
+
+func ingestProcessPositions(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) ([]dip.Vorgangsposition, error) {
+	logger.Debug("Ingesting process positions")
+	var count = 0
+	var cursor *string
+
+	for {
+		resp, err := client.GetVorgangspositionListWithResponse(context.Background(), &dip.GetVorgangspositionListParams{
+			FAktualisiertStart: &lastSuccessTimestamp,
+			FAktualisiertEnd:   &currentTimestamp,
+			Cursor:             cursor,
+		})
+		logger.Debug(fmt.Sprintf("fetched first process position of total %d", resp.JSON200.NumFound))
+		if err != nil {
+			logger.Error(fmt.Sprintf("failed to ingest process positions: %v", err))
+			return nil, fmt.Errorf("failed to ingest process positions: %w", err)
+		}
+		if resp.JSON200 == nil {
+			logger.Error(fmt.Sprintf("unexpected response: %v", resp))
+			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
+		}
+
+		// Capture documents in closure for parallel ingestion
+		documents := resp.JSON200.Documents
+		ingestionWG.Add(1)
+		ingestionsTasks <- func() {
+			err := processProcessPositions(documents, db, logger)
+			if err != nil {
+				logger.Fatal(fmt.Sprintf("failed to process process positions: %v", err))
+			}
+		}
+		count += len(documents)
+		cursor = &resp.JSON200.Cursor
+		logger.Debug(fmt.Sprintf("Got %d process positions with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		if int32(count) >= resp.JSON200.NumFound {
+			break
+		}
+		time.Sleep(requestTimeout)
+	}
+	return nil, nil
+}
+
+func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInterface, logger *Logger) error {
+	logger.Debug(fmt.Sprintf("processing %d process positions", len(processPositions)))
+	for _, p := range processPositions {
+		documentType, err := getDocumentType(string(p.Dokumentart))
+		if err != nil {
+			return fmt.Errorf("failed to get document type for process position %s: %w", p.Id, err)
+		}
+		var printedPaperId *string = nil
+		var protocolId *string = nil
+		if documentType == DocumentPrintedPaper {
+			printedPaperId = &p.Fundstelle.Id
+			var exists bool
+			err = db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM printed_papers WHERE id=$1)", p.Fundstelle.Id)
+			if err != nil {
+				return fmt.Errorf("failed to check existence of printed paper %s: %w", p.Fundstelle.Id, err)
+			}
+			if !exists {
+				logger.Warn(fmt.Sprintf("skipping process position %s: printed paper %s not found", p.Id, p.Fundstelle.Id))
+				continue
+			}
+		} else {
+			protocolId = &p.Fundstelle.Id
+			var exists bool
+			err = db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM protocols WHERE id=$1)", p.Fundstelle.Id)
+			if err != nil {
+				return fmt.Errorf("failed to check existence of protocol %s: %w", p.Fundstelle.Id, err)
+			}
+			if !exists {
+				logger.Warn(fmt.Sprintf("skipping process position %s: protocol %s not found", p.Id, p.Fundstelle.Id))
+				continue
+			}
+			if err != nil {
+				logger.Warn(fmt.Sprintf("skipping process position %s: protocol %s not found", p.Id, p.Fundstelle.Id))
+				continue
+			}
+		}
+		processId := &p.VorgangId
+		var exists bool
+		err = db.Get(&exists, "SELECT EXISTS(SELECT 1 FROM processes WHERE id=$1)", *processId)
+		if err != nil {
+			return fmt.Errorf("failed to check existence of process %s: %w", *processId, err)
+		}
+		if !exists {
+			logger.Warn(fmt.Sprintf("skipping process position %s: process %s not found", p.Id, *processId))
+			continue
+		}
+
+		_, err = db.Exec("INSERT INTO process_positions (id, type, process_id, printed_paper_id, protocol_id, association, continuation, supplement, title, document_type, date, api_updated) "+
+			"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) "+
+			"ON CONFLICT (id) DO UPDATE SET type = $2, process_id = $3, printed_paper_id = $4, protocol_id = $5, association = $6, continuation = $7, supplement = $8, title = $9, document_type = $10, date = $11, api_updated = $12",
+			p.Id, p.Vorgangstyp, p.VorgangId, printedPaperId, protocolId, p.Zuordnung, p.Fortsetzung, p.Nachtrag, p.Titel, documentType, p.Datum.Time, p.Aktualisiert)
+		if err != nil {
+			// Check for foreign key violation (PostgreSQL code "23503")
+			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23503" {
+				logger.Warn(fmt.Sprintf("foreign key constraint error inserting process position %s: %v, skipping", p.Id, err))
+				continue
+			}
+			return fmt.Errorf("failed to insert process position %s: %w", p.Id, err)
+		}
+	}
+	return nil
+}
+
+// TODO: I think we use "type" wrong everywhere. We don't want the "type" by the API, but e.g. for activities the "aktivitaetsart"
 func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitializeNewerThan *time.Time) error {
 	reinitializeData := reinitializeActivities || reinitializeEntities
 	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
@@ -509,11 +692,12 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 	}
 	defer db.Close()
 
+	initIngestionWorker()
+
 	// Logger uses db connection (not transaction) so logs always commit even if transaction rolls back
 	consoleDebugLevel := Debug
 	logger := NewLogger(db, &consoleDebugLevel, nil)
 
-	// Local helper to log errors to ingestion_logs
 	logIngestionError := func(err error) {
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to ingest data: %v", err))
@@ -575,7 +759,6 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 	}
 
 	var currentTimestamp = time.Now().UTC()
-	// Read from tx to see the deleted ingestion_logs (for testing fresh start)
 	lastSuccessTimestamp := time.Time{}
 
 	if reinitializeData && reinitializeNewerThan != nil {
@@ -610,6 +793,7 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 	}
 
 	if reinitializeActivities || !reinitializeData {
+
 		logger.Info(fmt.Sprintf("ingesting protocols"))
 
 		_, err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
@@ -637,6 +821,36 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 		logger.Debug("Waiting for all printed paper ingestion tasks to complete...")
 		ingestionWG.Wait()
 		logger.Info("All printed paper ingestion tasks completed")
+
+		time.Sleep(ingestionSleepTime)
+
+		logger.Info(fmt.Sprintf("ingesting processes"))
+
+		_, err = ingestProcesses(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+		if err != nil {
+			logIngestionError(err)
+			txErr = err
+			return err
+		}
+
+		logger.Debug("Waiting for all process ingestion tasks to complete...")
+		ingestionWG.Wait()
+		logger.Info("All process ingestion tasks completed")
+
+		time.Sleep(ingestionSleepTime)
+
+		logger.Info(fmt.Sprintf("ingesting process positions"))
+
+		_, err = ingestProcessPositions(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+		if err != nil {
+			logIngestionError(err)
+			txErr = err
+			return err
+		}
+
+		logger.Debug("Waiting for all process position ingestion tasks to complete...")
+		ingestionWG.Wait()
+		logger.Info("All process position ingestion tasks completed")
 
 		time.Sleep(ingestionSleepTime)
 

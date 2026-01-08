@@ -131,3 +131,14 @@ func clearEntitiesDatabase(reinitializeNewerThan *time.Time, db DBInterface, log
 	logger.Info("Cleared existing entities data")
 	return nil
 }
+
+func getDocumentType(documentType string) (DocumentType, error) {
+	switch documentType {
+	case "Drucksache":
+		return DocumentPrintedPaper, nil
+	case "Plenarprotokoll":
+		return DocumentProtocol, nil
+	default:
+		return "", fmt.Errorf("unknown document type: %s", documentType)
+	}
+}
