@@ -163,7 +163,7 @@ func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error 
 	return nil
 }
 
-func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) ([]dip.PlenarprotokollText, error) {
+func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) error {
 	logger.Debug("Ingesting protocols")
 	var count = 0
 	var cursor *string
@@ -175,10 +175,10 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 			Cursor:             cursor,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to ingest protocols: %w", err)
+			return fmt.Errorf("failed to ingest protocols: %w", err)
 		}
 		if resp.JSON200 == nil {
-			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
+			return fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
 		// Capture documents in closure for parallel ingestion
@@ -199,7 +199,7 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 		}
 		time.Sleep(requestTimeout)
 	}
-	return nil, nil
+	return nil
 }
 
 func processProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logger *Logger) error {
@@ -257,7 +257,7 @@ func processProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logge
 	return nil
 }
 
-func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) ([]dip.DrucksacheText, error) {
+func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) error {
 	logger.Debug("Ingesting printed papers")
 	var count = 0
 	var cursor *string
@@ -269,10 +269,10 @@ func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp t
 			Cursor:             cursor,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to ingest printed papers: %w", err)
+			return fmt.Errorf("failed to ingest printed papers: %w", err)
 		}
 		if resp.JSON200 == nil {
-			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
+			return fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
 		// Capture documents in closure for parallel ingestion
@@ -294,7 +294,7 @@ func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp t
 		time.Sleep(requestTimeout)
 	}
 
-	return nil, nil
+	return nil
 }
 
 func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, logger *Logger) error {
@@ -382,7 +382,7 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 	return nil
 }
 
-func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) ([]dip.Aktivitaet, error) {
+func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) error {
 	logger.Debug("Ingesting activities")
 	var count = 0
 	var cursor *string
@@ -394,10 +394,10 @@ func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time
 			Cursor:             cursor,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to ingest activities: %w", err)
+			return fmt.Errorf("failed to ingest activities: %w", err)
 		}
 		if resp.JSON200 == nil {
-			return nil, fmt.Errorf("unexpected response status: %d", resp.StatusCode())
+			return fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
 		// Capture documents in closure for parallel ingestion
@@ -418,7 +418,7 @@ func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time
 		}
 		time.Sleep(requestTimeout)
 	}
-	return nil, nil
+	return nil
 }
 
 func processActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logger) error {
@@ -593,7 +593,7 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 	//------Ingestion Begins------//
 
 	if reinitializeEntities || !reinitializeData {
-		logger.Info(fmt.Sprintf("ingesting persons"))
+		logger.Info("ingesting persons")
 
 		_, err = ingestPersons(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
@@ -610,9 +610,9 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 	}
 
 	if reinitializeActivities || !reinitializeData {
-		logger.Info(fmt.Sprintf("ingesting protocols"))
+		logger.Info("ingesting protocols")
 
-		_, err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+		err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
 			logIngestionError(err)
 			txErr = err
@@ -625,9 +625,9 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 
 		time.Sleep(ingestionSleepTime)
 
-		logger.Info(fmt.Sprintf("ingesting printed papers"))
+		logger.Info("ingesting printed papers")
 
-		_, err = ingestPrintedPapers(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+		err = ingestPrintedPapers(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
 			logIngestionError(err)
 			txErr = err
@@ -640,9 +640,9 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 
 		time.Sleep(ingestionSleepTime)
 
-		logger.Info(fmt.Sprintf("ingesting activities"))
+		logger.Info("ingesting activities")
 
-		_, err = ingestActivities(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+		err = ingestActivities(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
 		if err != nil {
 			logIngestionError(err)
 			txErr = err

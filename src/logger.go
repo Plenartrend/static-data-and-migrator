@@ -83,6 +83,6 @@ func (l *Logger) Fatal(message string) {
 func (l *Logger) Log(status string, message string) {
 	_, err := l.db.Exec("INSERT INTO logs (timestamp, status, message) VALUES (NOW(), $1, $2)", status, message)
 	if err != nil {
-		log.Printf("ERROR:Failed to write log to database: %v", err)
+		log.Printf("ERROR: Failed to write log to database: %v", err)
 	}
 }
