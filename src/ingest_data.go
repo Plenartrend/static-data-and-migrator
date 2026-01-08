@@ -628,7 +628,6 @@ func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInter
 	return nil
 }
 
-// TODO: Separate Firstname, Lastname, Groupname and write regex to capture them including whitespaces and newlines
 // TODO: Merge overlapping speeches
 func getRelevantPartsOfSpeechForSpeaker(speakerName string, protocol *Protocol) ([]string, error) {
 	if protocol == nil {
@@ -636,10 +635,11 @@ func getRelevantPartsOfSpeechForSpeaker(speakerName string, protocol *Protocol) 
 	}
 	text := protocol.Text
 
-	namePattern := `([A-ZÄÖÜ][a-zäöüß]+(?:[\s\n]+[A-ZÄÖÜ][a-zäöüß]+)*)[\s\n]+([A-ZÄÖÜ][a-zäöüß]+)(?:[\s\n]*)\((.{1,30})\):`
+	//namePattern := `([A-ZÄÖÜ][a-zäöüß]+(?:[\s\n]+[A-ZÄÖÜ][a-zäöüß]+)*)[\s\n]+([A-ZÄÖÜ][a-zäöüß]+)(?:[\s\n]*)\((.{1,30})\):`
+	namePattern := regexp.QuoteMeta(speakerName) + ":.{0,1000}"
 	re := regexp.MustCompile(namePattern)
 
-	matches := re.FindAllStringSubmatchIndex(text, -1)
+	matches := re.FindAllStringIndex(text, -1)
 
 	if len(matches) == 0 {
 		return nil, nil // No matches
@@ -647,7 +647,7 @@ func getRelevantPartsOfSpeechForSpeaker(speakerName string, protocol *Protocol) 
 
 	result := []string{}
 	for _, match := range matches {
-		endIndex := min(match[1]+4000, len(text))
+		endIndex := min(match[1]+11000, len(text))
 		result = append(result, text[match[0]:endIndex])
 	}
 
@@ -655,10 +655,10 @@ func getRelevantPartsOfSpeechForSpeaker(speakerName string, protocol *Protocol) 
 }
 
 // TODO: Get Firstname, Lastname, Groupname. Actually we need group shortname, but it seems so far we only safe long name?
-func assignSpeechesToActivities() {
+func assignSpeechesToActivities() error {
 	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
 
@@ -669,7 +669,8 @@ func assignSpeechesToActivities() {
 	//err = db.Select(&protocols, "SELECT * FROM protocols p WHERE EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
 	err = db.Select(&protocols, "SELECT * FROM protocols p WHERE p.ID = 5626 AND EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
 	if err != nil {
-		log.Fatalf("Failed to select protocols: %v", err)
+		logger.Error(fmt.Sprintf("failed to select protocols: %v", err))
+		return fmt.Errorf("failed to select protocols: %w", err)
 	}
 
 	for _, protocol := range protocols {
@@ -678,16 +679,29 @@ func assignSpeechesToActivities() {
 		err = db.Select(&activities, "SELECT * FROM activities a WHERE protocol_id = $1 AND a.type = 'Rede' AND (text IS NULL OR text = '') LIMIT 10", protocol.ID)
 		logger.Debug(fmt.Sprintf("Found %d activities for protocol %d", len(activities), protocol.ID))
 		if err != nil {
-			log.Fatalf("Failed to select activities: %v", err)
+			logger.Error(fmt.Sprintf("failed to select activities: %v", err))
+			return fmt.Errorf("failed to select activities: %w", err)
 		}
 		var activitiesGroupedBySpeaker = make(map[string][]Activity)
 		for _, activity := range activities {
 			var role Role
 			err = db.Get(&role, "SELECT * FROM roles WHERE id = $1", activity.RoleID)
 			if err != nil {
-				log.Fatalf("Failed to select role: %v", err)
+				logger.Error(fmt.Sprintf("failed to select role: %v", err))
+				return fmt.Errorf("failed to select role: %w", err)
 			}
-			activitiesGroupedBySpeaker[role.LastName+" "+role.FirstName] = append(activitiesGroupedBySpeaker[role.LastName+" "+role.FirstName], activity)
+			if !role.GroupID.Valid {
+				logger.Warn(fmt.Sprintf("skipping activity %d: role %d has no group", activity.ID, activity.RoleID))
+				continue
+			}
+			var groupName string
+			err = db.Get(&groupName, "SELECT name FROM parliamentary_groups WHERE id = $1", role.GroupID)
+			if err != nil {
+				logger.Error(fmt.Sprintf("failed to select group name: %v", err))
+				return fmt.Errorf("failed to select group name: %w", err)
+			}
+			var speakerName string = role.FirstName + " " + role.LastName + " (" + groupName + ")"
+			activitiesGroupedBySpeaker[speakerName] = append(activitiesGroupedBySpeaker[speakerName], activity)
 		}
 
 		for speaker, activities := range activitiesGroupedBySpeaker {
@@ -697,20 +711,24 @@ func assignSpeechesToActivities() {
 			}
 			speeches, err := getRelevantPartsOfSpeechForSpeaker(speaker, &protocol)
 			if err != nil {
-				log.Fatalf("Failed to get speeches for activities: %v", err)
+				logger.Error(fmt.Sprintf("failed to get speeches for activities: %v", err))
+				return fmt.Errorf("failed to get speeches for activities: %w", err)
 			}
 			texts, err := processSpeeches(speeches, speaker, activityIDs, logger)
 			if err != nil {
-				log.Fatalf("Failed to process speeches: %v", err)
+				logger.Error(fmt.Sprintf("failed to process speeches: %v", err))
+				return fmt.Errorf("failed to process speeches: %w", err)
 			}
 			for activityID, text := range texts {
 				_, err = db.Exec("UPDATE activities SET text = $1 WHERE id = $2", text, activityID)
 				if err != nil {
-					log.Fatalf("Failed to update activity text: %v", err)
+					logger.Error(fmt.Sprintf("failed to update activity text: %v", err))
+					return fmt.Errorf("failed to update activity text: %w", err)
 				}
 			}
 		}
 	}
+	return nil
 }
 
 func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitializeNewerThan *time.Time) error {

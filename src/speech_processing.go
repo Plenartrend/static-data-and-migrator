@@ -24,14 +24,24 @@ func getGeminiClient() (*genai.Client, error) {
 
 const geminiModel string = "gemini-2.5-flash"
 
-const responseSchema = `{
-	"type": "object",
-	"description": "Map of activity ID to cleaned speech text",
-	"additionalProperties": {
-		"type": "string",
-		"description": "The cleaned speech text for this activity"
-	}
-}`
+var responseSchema = genai.Schema{
+	Type:        "array",
+	Description: "Array of activity ID to cleaned speech text mappings",
+	Items: &genai.Schema{
+		Type: "object",
+		Properties: map[string]*genai.Schema{
+			"activity_id": {
+				Type:        "integer",
+				Description: "The ID of the activity",
+			},
+			"speech_text": {
+				Type:        "string",
+				Description: "The cleaned speech text for this activity",
+			},
+		},
+		Required: []string{"activity_id", "speech_text"},
+	},
+}
 
 const systemInstructionText string = `It is your job to remove noise from speeches and then assign them to activities. The speeches are held by politicians in the German parliament and are held in the German language. 
 An Activity is like a container for a speech. An activity has an ID and a speaker. 
@@ -103,21 +113,26 @@ func processSpeeches(speeches []string, speakerName string, activities []int, lo
 	responseText := resp.Text()
 	logger.Debug(fmt.Sprintf("Gemini model response (length=%d): %s", len(responseText), responseText))
 
-	// Parse the JSON response
-	var result map[string]string
-	if err := json.Unmarshal([]byte(resp.Text()), &result); err != nil {
+	// Parse the JSON response as an array
+	var rawResult []map[string]interface{}
+	if err := json.Unmarshal([]byte(resp.Text()), &rawResult); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// Convert string keys to int keys
+	// Convert to map[int]string
 	resultMap := make(map[int]string)
-	for key, value := range result {
-		var activityID int
-		if _, err := fmt.Sscanf(key, "%d", &activityID); err != nil {
-			logger.Warn(fmt.Sprintf("Failed to parse activity ID '%s': %v", key, err))
+	for _, item := range rawResult {
+		activityID, ok := item["activity_id"].(float64)
+		if !ok {
+			logger.Warn(fmt.Sprintf("Failed to parse activity_id from item: %v", item))
 			continue
 		}
-		resultMap[activityID] = value
+		speechText, ok := item["speech_text"].(string)
+		if !ok {
+			logger.Warn(fmt.Sprintf("Failed to parse speech_text for activity ID %d", int(activityID)))
+			continue
+		}
+		resultMap[int(activityID)] = speechText
 	}
 
 	return resultMap, nil
