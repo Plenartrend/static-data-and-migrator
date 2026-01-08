@@ -104,18 +104,18 @@ type PrintedPaperSigner struct {
 }
 
 type Protocol struct {
-	ID             int       `db:"id" json:"id,omitempty"`
-	Title          string    `db:"title" json:"title,omitempty"`
-	DocumentNumber string    `db:"document_number" json:"document_number,omitempty"`
-	Publisher      Body      `db:"publisher" json:"publisher,omitempty"`
-	SessionNote    string    `db:"session_note" json:"session_note,omitempty"`
-	URL            string    `db:"url" json:"url,omitempty"`
-	Text           string    `db:"text" json:"text,omitempty"`
-	ElectionPeriod int       `db:"election_period" json:"election_period,omitempty"`
-	Date           time.Time `db:"date" json:"date,omitempty"`
-	APIUpdated     time.Time `db:"api_updated" json:"api_updated,omitempty"`
-	Updated        time.Time `db:"updated" json:"updated,omitempty"`
-	Created        time.Time `db:"created" json:"created,omitempty"`
+	ID             int            `db:"id" json:"id,omitempty"`
+	Title          string         `db:"title" json:"title,omitempty"`
+	DocumentNumber string         `db:"document_number" json:"document_number,omitempty"`
+	Publisher      Body           `db:"publisher" json:"publisher,omitempty"`
+	SessionNote    sql.NullString `db:"session_note" json:"session_note,omitempty"`
+	URL            string         `db:"url" json:"url,omitempty"`
+	Text           string         `db:"text" json:"text,omitempty"`
+	ElectionPeriod int            `db:"election_period" json:"election_period,omitempty"`
+	Date           time.Time      `db:"date" json:"date,omitempty"`
+	APIUpdated     time.Time      `db:"api_updated" json:"api_updated,omitempty"`
+	Updated        time.Time      `db:"updated" json:"updated,omitempty"`
+	Created        time.Time      `db:"created" json:"created,omitempty"`
 }
 
 type Activity struct {

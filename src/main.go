@@ -72,6 +72,19 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "Data ingested successfully")
 	})
+
+	http.HandleFunc("/assign-speeches", func(w http.ResponseWriter, r *http.Request) {
+		assignSpeechesToActivities()
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "Speeches assigned to activities successfully")
+	})
+
+	http.HandleFunc("/test-gemini", func(w http.ResponseWriter, r *http.Request) {
+		test()
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "Test completed successfully")
+	})
+
 	log.Println("Server starting on :8080")
 	http.ListenAndServe(":8080", nil)
 }

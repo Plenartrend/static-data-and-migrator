@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"sync"
 	"time"
 
@@ -627,6 +628,91 @@ func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInter
 	return nil
 }
 
+// TODO: Separate Firstname, Lastname, Groupname and write regex to capture them including whitespaces and newlines
+// TODO: Merge overlapping speeches
+func getRelevantPartsOfSpeechForSpeaker(speakerName string, protocol *Protocol) ([]string, error) {
+	if protocol == nil {
+		return nil, fmt.Errorf("protocol cannot be nil")
+	}
+	text := protocol.Text
+
+	namePattern := `([A-ZÄÖÜ][a-zäöüß]+(?:[\s\n]+[A-ZÄÖÜ][a-zäöüß]+)*)[\s\n]+([A-ZÄÖÜ][a-zäöüß]+)(?:[\s\n]*)\((.{1,30})\):`
+	re := regexp.MustCompile(namePattern)
+
+	matches := re.FindAllStringSubmatchIndex(text, -1)
+
+	if len(matches) == 0 {
+		return nil, nil // No matches
+	}
+
+	result := []string{}
+	for _, match := range matches {
+		endIndex := min(match[1]+4000, len(text))
+		result = append(result, text[match[0]:endIndex])
+	}
+
+	return result, nil
+}
+
+// TODO: Get Firstname, Lastname, Groupname. Actually we need group shortname, but it seems so far we only safe long name?
+func assignSpeechesToActivities() {
+	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer db.Close()
+
+	consoleLogLevel := Debug
+	logger := NewLogger(db, &consoleLogLevel, nil)
+
+	var protocols []Protocol
+	//err = db.Select(&protocols, "SELECT * FROM protocols p WHERE EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
+	err = db.Select(&protocols, "SELECT * FROM protocols p WHERE p.ID = 5626 AND EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
+	if err != nil {
+		log.Fatalf("Failed to select protocols: %v", err)
+	}
+
+	for _, protocol := range protocols {
+		var activities []Activity
+		//err = db.Select(&activities, "SELECT * FROM activities a WHERE protocol_id = $1 AND a.type = 'Rede' AND (text IS NULL OR text = '')", protocol.ID)
+		err = db.Select(&activities, "SELECT * FROM activities a WHERE protocol_id = $1 AND a.type = 'Rede' AND (text IS NULL OR text = '') LIMIT 10", protocol.ID)
+		logger.Debug(fmt.Sprintf("Found %d activities for protocol %d", len(activities), protocol.ID))
+		if err != nil {
+			log.Fatalf("Failed to select activities: %v", err)
+		}
+		var activitiesGroupedBySpeaker = make(map[string][]Activity)
+		for _, activity := range activities {
+			var role Role
+			err = db.Get(&role, "SELECT * FROM roles WHERE id = $1", activity.RoleID)
+			if err != nil {
+				log.Fatalf("Failed to select role: %v", err)
+			}
+			activitiesGroupedBySpeaker[role.LastName+" "+role.FirstName] = append(activitiesGroupedBySpeaker[role.LastName+" "+role.FirstName], activity)
+		}
+
+		for speaker, activities := range activitiesGroupedBySpeaker {
+			activityIDs := []int{}
+			for _, activity := range activities {
+				activityIDs = append(activityIDs, activity.ID)
+			}
+			speeches, err := getRelevantPartsOfSpeechForSpeaker(speaker, &protocol)
+			if err != nil {
+				log.Fatalf("Failed to get speeches for activities: %v", err)
+			}
+			texts, err := processSpeeches(speeches, speaker, activityIDs, logger)
+			if err != nil {
+				log.Fatalf("Failed to process speeches: %v", err)
+			}
+			for activityID, text := range texts {
+				_, err = db.Exec("UPDATE activities SET text = $1 WHERE id = $2", text, activityID)
+				if err != nil {
+					log.Fatalf("Failed to update activity text: %v", err)
+				}
+			}
+		}
+	}
+}
+
 func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitializeNewerThan *time.Time) error {
 	reinitializeData := reinitializeActivities || reinitializeEntities
 	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
@@ -638,8 +724,8 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 	initIngestionWorker()
 
 	// Logger uses db connection (not transaction) so logs always commit even if transaction rolls back
-	consoleDebugLevel := Debug
-	logger := NewLogger(db, &consoleDebugLevel, nil)
+	consoleLogLevel := Debug
+	logger := NewLogger(db, &consoleLogLevel, nil)
 
 	logIngestionError := func(err error) {
 		if err != nil {
@@ -826,7 +912,6 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 		return err
 	}
 
-	//TODO: Test this
 	_, err = db.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES ($1, 'success')", time.Now().UTC())
 	if err != nil {
 		err = fmt.Errorf("failed to insert ingestion log: %w", err)
