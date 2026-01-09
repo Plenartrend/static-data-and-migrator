@@ -96,13 +96,6 @@ type PrintedPaper struct {
 	Created        time.Time     `db:"created" json:"created,omitempty"`
 }
 
-type PrintedPaperSigner struct {
-	PrintedPaperID int       `db:"printed_paper_id" json:"printed_paper_id,omitempty"`
-	RoleID         int       `db:"role_id" json:"role_id,omitempty"`
-	Updated        time.Time `db:"updated" json:"updated,omitempty"`
-	Created        time.Time `db:"created" json:"created,omitempty"`
-}
-
 type Protocol struct {
 	ID             int            `db:"id" json:"id,omitempty"`
 	Title          string         `db:"title" json:"title,omitempty"`

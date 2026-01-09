@@ -316,32 +316,6 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 		if err != nil {
 			return fmt.Errorf("failed to insert printed paper %s: %w", p.Id, err)
 		}
-
-		_, err = db.Exec("DELETE FROM printed_paper_signers WHERE printed_paper_id=$1", p.Id)
-		if err != nil {
-			return fmt.Errorf("failed to delete printed paper signers for paper %s: %w", p.Id, err)
-		}
-
-		// TODO AutorenAnzeige does not contain all authors, we need to extract them from the text
-		if p.AutorenAnzeige != nil {
-			for _, author := range *p.AutorenAnzeige {
-				var roleId int
-				err := db.Get(&roleId, "SELECT id FROM roles WHERE person_id=$1 AND election_period=$2", author.Id, electionPeriod)
-				if err != nil {
-					logger.Warn(fmt.Sprintf("skipping author %s for printed paper %s: role not found", author.Id, p.Id))
-					continue
-				}
-
-				_, err = db.Exec(`
-				INSERT INTO printed_paper_signers (printed_paper_id, role_id)
-				VALUES ($1, $2)
-				ON CONFLICT DO NOTHING
-			`, p.Id, roleId)
-				if err != nil {
-					logger.Warn(fmt.Sprintf("failed to insert author %s for printed paper %s: %v", author.Id, p.Id, err))
-				}
-			}
-		}
 	}
 
 	return nil

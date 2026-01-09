@@ -111,15 +111,6 @@ CREATE TABLE printed_papers (
     created TIMESTAMP
 );
 
--- Printed paper signers junction table
-CREATE TABLE printed_paper_signers (
-    printed_paper_id INTEGER NOT NULL REFERENCES printed_papers(id) ON DELETE CASCADE,
-    role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE, --Watch out when deleting roles: signer data will be lost!
-    PRIMARY KEY (printed_paper_id, role_id),
-    updated TIMESTAMP,
-    created TIMESTAMP
-);
-
 -- Protocols (Plenarprotokolle)
 CREATE TABLE protocols (
     id INTEGER PRIMARY KEY,
@@ -242,10 +233,6 @@ CREATE TRIGGER set_timestamps_process_positions
 
 CREATE TRIGGER set_timestamps_printed_papers
     BEFORE INSERT OR UPDATE ON printed_papers
-    FOR EACH ROW EXECUTE FUNCTION set_timestamps();
-
-CREATE TRIGGER set_timestamps_printed_paper_signers
-    BEFORE INSERT OR UPDATE ON printed_paper_signers
     FOR EACH ROW EXECUTE FUNCTION set_timestamps();
 
 CREATE TRIGGER set_timestamps_protocols
