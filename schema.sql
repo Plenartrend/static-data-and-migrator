@@ -1,5 +1,4 @@
 -- Schema for Plenartrend database
--- Generated from src/api_types.go
 
 DROP SCHEMA IF EXISTS plenartrend CASCADE;
 CREATE SCHEMA plenartrend;
@@ -139,7 +138,7 @@ CREATE TABLE activities (
     api_updated TIMESTAMP,
     updated TIMESTAMP,
     created TIMESTAMP,
-    -- Ensure activity references either a printed paper or a protocol (or neither), but maintains consistency
+    -- Ensure activity references either a printed paper or a protocol, but maintains consistency
     CONSTRAINT activity_document_check CHECK (
         (document_type = 'printedPaper' AND printed_paper_id IS NOT NULL AND protocol_id IS NULL) OR
         (document_type = 'protocol' AND protocol_id IS NOT NULL AND printed_paper_id IS NULL)
@@ -161,7 +160,12 @@ CREATE TABLE process_positions (
     date TIMESTAMP,
     api_updated TIMESTAMP,
     updated TIMESTAMP,
-    created TIMESTAMP
+    created TIMESTAMP,
+    -- Ensure process position references either a printed paper or a protocol, but maintains consistency
+    CONSTRAINT process_position_document_check CHECK (
+        (document_type = 'printedPaper' AND printed_paper_id IS NOT NULL AND protocol_id IS NULL) OR
+        (document_type = 'protocol' AND protocol_id IS NOT NULL AND printed_paper_id IS NULL)
+    )
 );
 
 CREATE TABLE ingestion_logs (
