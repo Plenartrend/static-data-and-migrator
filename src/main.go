@@ -85,6 +85,17 @@ func main() {
 		fmt.Fprint(w, "Test completed successfully")
 	})
 
+	http.HandleFunc("/assign-speeches-iterative", func(w http.ResponseWriter, r *http.Request) {
+		err := assignSpeechesToActivitiesIterative()
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, "Failed to assign speeches iteratively", err)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "Speeches assigned to activities iteratively successfully")
+	})
+
 	log.Println("Server starting on :8080")
 	http.ListenAndServe(":8080", nil)
 }
