@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,28 +12,26 @@ import (
 	"google.golang.org/genai"
 )
 
-type SpeechMetaData struct {
-	ActivityID  int
-	SpeakerName string
-}
-
 type PreviouslyUnfinishedSpeech struct {
-	Present    bool
-	Speaker    string
-	ActivityID int
-	Speech     string
+	Present bool
+	Speaker string
+	Speech  string
 }
 
-const iterativeInstructionText = `You are an expert at extracting german speeches from german parliamentary protocols and assigning them to the correct activities based on speaker information.
-An activity is like a container for a speech and has an ID and a speaker.
-You will receive a chunk of a parliamentary protocol along with a list of activities and their associated speakers. The speeches are in the same order as the IDs of the activities.
-One speech is defined as a full speech by one person, including all questions and answers.
-Your task is to:
-1. Identify speeches that start and end within the given chunk. For each complete speech, return the activity ID it belongs to and the full speech text.
-2. If there is a speech that starts in this chunk but does not end (i.e., it is incomplete), return the activity ID and the beginning part of the speech.
-3. If there was a speech that started in a previous chunk and is continued in this chunk, append the continuation to that speech. Indicate whether this previously unfinished speech is now completed or still ongoing.
-Note that you must extract the speeches from start to finish, truncating anything like parts from other speeches at the beginning and end.
-Ensure that all returned speech texts maintain the original language and formatting as found in the protocol.`
+const iterativeInstructionText = `
+You will receive a chunk of a German parliamentary protocol. Your task is to extract speeches.
+A speech is the full statement of one person, including any interruptions (e.g., questions or interjections by others), which should be included as part of the speech.
+
+1. Identify speeches that start and end within this chunk. For each, return the speaker's full name and the complete speech text.
+2. If a speech starts in this chunk but does not end, return the speaker's full name and the partial speech.
+3. If a speech started in a previous chunk and continues here, return the continuation and indicate whether the speech is now complete or still ongoing.
+
+"Speaker's full name" refers to the format "FirstName LastName" with no titles, honorifics, or party affiliations.
+Speeches always begin with the speaker being named (e.g., "Dr. Angela Merkel (CDU/CSU):").
+Note that questions or interjections also begin with a speaker name and should be included as part of the ongoing speech rather than separated.
+Do not include "speeches" by the president or vice president of the parliament.
+Maintain the original language and formatting of the speech text exactly as in the protocol.
+`
 
 const chunkSize = 25_000
 
@@ -65,9 +64,9 @@ func getResponseSchema() *genai.Schema {
 				Items: &genai.Schema{
 					Type: "object",
 					Properties: map[string]*genai.Schema{
-						"activity_id": {
-							Type:        "integer",
-							Description: "The ID of the activity the speech belongs to.",
+						"speaker": {
+							Type:        "string",
+							Description: "The full name of the speaker that gave the speech.",
 						},
 						"speech_text": {
 							Type:        "string",
@@ -84,9 +83,9 @@ func getResponseSchema() *genai.Schema {
 						Type:        "boolean",
 						Description: "Indicates if there is a speech that has started but is not yet complete.",
 					},
-					"activity_id": {
-						Type:        "integer",
-						Description: "The ID of the activity for the started speech.",
+					"speaker": {
+						Type:        "string",
+						Description: "The full name of the speaker that gave the started speech.",
 					},
 					"begin_of_speech": {
 						Type:        "string",
@@ -98,25 +97,34 @@ func getResponseSchema() *genai.Schema {
 	}
 }
 
-func addTextToActivity(db DBInterface, id int, speech string) error {
-	_, err := db.Exec("UPDATE activities SET text = $2 WHERE id = $1", id, speech)
+func addTextToActivity(protocolId int, speaker string, speech string, db DBInterface, logger *Logger) error {
+	var activityId int
+	err := db.Get(&activityId, `
+			SELECT a.id
+			FROM activities a, roles r
+			WHERE a.role_id = r.id
+				AND a.protocol_id = $1
+				AND a.type = 'Rede'
+				AND CONCAT(r.first_name, ' ', r.last_name) = $2
+			ORDER BY a.id asc
+			LIMIT 1
+		`, protocolId, speaker)
+	if err == sql.ErrNoRows {
+		logger.Warn(fmt.Sprintf("could not correlate speech by speaker %s in protocol %d to an activity", speaker, protocolId))
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to find activity for speaker %s in protocol %d: %w", speaker, protocolId, err)
+	}
+
+	_, err = db.Exec("UPDATE activities SET text = $2 WHERE id = $1", activityId, speech)
 	if err != nil {
-		return fmt.Errorf("failed to update activity with completed speech: %w", err)
+		return fmt.Errorf("failed to update activity %d with speech for speaker %s: %w", activityId, speaker, err)
 	}
 	return nil
 }
 
-func removeById(speeches []SpeechMetaData, id int) []SpeechMetaData {
-	for i, speech := range speeches {
-		if speech.ActivityID == id {
-			return append(speeches[:i], speeches[i+1:]...)
-		}
-	}
-	return speeches
-}
-
 // TODO use db transaction
-func processSpeechesIterative(protocolText string, speechMetaData []SpeechMetaData, db DBInterface, logger *Logger) error {
+func processSpeechesIterative(protocolId int, protocolText string, db DBInterface, logger *Logger) error {
 	client, err := getGeminiClient()
 
 	if err != nil {
@@ -130,10 +138,9 @@ func processSpeechesIterative(protocolText string, speechMetaData []SpeechMetaDa
 	}
 
 	var previouslyUnfinishedSpeech PreviouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{
-		Present:    false,
-		Speaker:    "",
-		ActivityID: 0,
-		Speech:     "",
+		Present: false,
+		Speaker: "",
+		Speech:  "",
 	}
 
 	startTime := time.Now()
@@ -144,47 +151,30 @@ func processSpeechesIterative(protocolText string, speechMetaData []SpeechMetaDa
 
 		logger.Debug(fmt.Sprintf("Processing chunk from index %d to %d", i, end))
 
-		var parts []*genai.Part
-
-		var activitiesPrompt genai.Part = genai.Part{
-			Text: "--------These are the Activities: --------\n",
-		}
-		parts = append(parts, &activitiesPrompt)
-
-		for _, activity := range speechMetaData {
-			parts = append(parts, &genai.Part{
-				Text: fmt.Sprintf("Activity ID: %d, Speaker: %s\n", activity.ActivityID, activity.SpeakerName),
-			})
-		}
-
-		parts = append(parts, &genai.Part{
-			Text: "--------This is the information regarding a potential previously unfinished speech: --------\n",
-		})
-
-		var text string
+		var unfinishedSpeechText string
 		if previouslyUnfinishedSpeech.Present {
-			text = "The previous chunk contained an unfinished speech by " + previouslyUnfinishedSpeech.Speaker + " with activity ID " + fmt.Sprintf("%d", previouslyUnfinishedSpeech.ActivityID) + ".\n"
+			unfinishedSpeechText = "The previous chunk contained an unfinished speech by " + previouslyUnfinishedSpeech.Speaker + "\n"
 		} else {
-			text = "The previous chunk did NOT contain an unfinished speech.\n"
+			unfinishedSpeechText = "The previous chunk did NOT contain an unfinished speech.\n"
 		}
 
-		parts = append(parts, &genai.Part{
-			Text: text,
-		})
-
-		parts = append(parts, &genai.Part{
-			Text: "--------This is the next protocol chunk: --------\n",
-		})
-
-		parts = append(parts, &genai.Part{
-			Text: chunk,
-		})
-
-		resp, err := client.Models.GenerateContent(context.Background(), geminiModel, []*genai.Content{
+		content := []*genai.Content{
 			{
-				Parts: parts,
+				Parts: []*genai.Part{
+					{
+						Text: unfinishedSpeechText,
+					},
+					{
+						Text: "The next protocol chunk is:\n",
+					},
+					{
+						Text: chunk,
+					},
+				},
 			},
-		}, &genai.GenerateContentConfig{
+		}
+
+		resp, err := client.Models.GenerateContent(context.Background(), geminiModel, content, &genai.GenerateContentConfig{
 			SystemInstruction:  systemInstruction,
 			ResponseMIMEType:   "application/json",
 			ResponseJsonSchema: getResponseSchema(),
@@ -216,19 +206,17 @@ func processSpeechesIterative(protocolText string, speechMetaData []SpeechMetaDa
 			if completed {
 				// Append to previous speech and mark as complete
 				previouslyUnfinishedSpeech.Speech += restOfSpeech
-				// Here you would save the completed speech to the database or desired storage
-				logger.Info(fmt.Sprintf("Completed speech for Activity ID %d: %s", previouslyUnfinishedSpeech.ActivityID, previouslyUnfinishedSpeech.Speech))
-				err := addTextToActivity(db, previouslyUnfinishedSpeech.ActivityID, previouslyUnfinishedSpeech.Speech)
+				logger.Info(fmt.Sprintf("Completed speech: %s", previouslyUnfinishedSpeech.Speech))
+				err := addTextToActivity(protocolId, previouslyUnfinishedSpeech.Speaker, previouslyUnfinishedSpeech.Speech, db, logger)
 				if err != nil {
 					return fmt.Errorf("failed to add completed speech to activity: %w", err)
 				}
-				speechMetaData = removeById(speechMetaData, previouslyUnfinishedSpeech.ActivityID)
 
 				previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
 			} else {
 				// Append to previous speech and continue
 				previouslyUnfinishedSpeech.Speech += restOfSpeech
-				logger.Info(fmt.Sprintf("Continuing speech for Activity ID %d: %s", previouslyUnfinishedSpeech.ActivityID, previouslyUnfinishedSpeech.Speech))
+				logger.Info(fmt.Sprintf("Continuing speech by Speaker %s: %s", previouslyUnfinishedSpeech.Speaker, previouslyUnfinishedSpeech.Speech))
 			}
 		}
 
@@ -236,16 +224,15 @@ func processSpeechesIterative(protocolText string, speechMetaData []SpeechMetaDa
 		completeSpeechesArray := resultMap["complete_speeches"].([]any)
 		for _, speechEntry := range completeSpeechesArray {
 			speechMap := speechEntry.(map[string]any)
-			activityID := int(speechMap["activity_id"].(float64))
+			speaker := speechMap["speaker"].(string)
 			speechText := speechMap["speech_text"].(string)
 
 			// Here you would save the complete speech to the database or desired storage
-			logger.Info(fmt.Sprintf("Complete speech for Activity ID %d: %s", activityID, speechText))
-			err := addTextToActivity(db, activityID, speechText)
+			logger.Info(fmt.Sprintf("Complete speech for Speaker %s: %s", speaker, speechText))
+			err := addTextToActivity(protocolId, speaker, speechText, db, logger)
 			if err != nil {
 				return fmt.Errorf("failed to add completed speech to activity: %w", err)
 			}
-			speechMetaData = removeById(speechMetaData, activityID)
 		}
 
 		// Handle started_speech
@@ -253,21 +240,24 @@ func processSpeechesIterative(protocolText string, speechMetaData []SpeechMetaDa
 		startedSpeechPresent := startedSpeechMap["present"].(bool)
 
 		if startedSpeechPresent {
-			activityID := int(startedSpeechMap["activity_id"].(float64))
+			speaker := startedSpeechMap["speaker"].(string)
 			beginOfSpeech := startedSpeechMap["begin_of_speech"].(string)
 
 			previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{
-				Present:    true,
-				ActivityID: activityID,
-				Speech:     beginOfSpeech,
+				Present: true,
+				Speaker: speaker,
+				Speech:  beginOfSpeech,
 			}
 
-			logger.Info(fmt.Sprintf("Started new unfinished speech for Activity ID %d: %s", activityID, beginOfSpeech))
+			logger.Info(fmt.Sprintf("Started new unfinished speech for Speaker %s: %s", speaker, beginOfSpeech))
 		} else {
 			previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
 		}
 
 		logger.Info(fmt.Sprintf("Finished processing chunk from index %d to %d", i, end))
+		if (i / chunkSize) > 2 {
+			break
+		}
 	}
 
 	logger.Info(fmt.Sprintf("Completed processing all chunks in %s", time.Since(startTime)))
@@ -286,6 +276,7 @@ func assignSpeechesToActivitiesIterative() error {
 	logger := NewLogger(db, &consoleLogLevel, nil)
 
 	var protocols []Protocol
+	// TODO only check for activities of the 'Rede' type
 	//err = db.Select(&protocols, "SELECT * FROM protocols p WHERE EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
 	err = db.Select(&protocols, "SELECT * FROM protocols p WHERE p.ID = 5626 AND EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
 	if err != nil {
@@ -294,45 +285,24 @@ func assignSpeechesToActivitiesIterative() error {
 	}
 
 	for _, protocol := range protocols {
-		var activities []Activity
-		err = db.Select(&activities, "SELECT * FROM activities a WHERE protocol_id = $1 AND a.type = 'Rede' AND (text IS NULL OR text = '')", protocol.ID)
-		logger.Debug(fmt.Sprintf("Found %d activities for protocol %d", len(activities), protocol.ID))
-		if err != nil {
-			logger.Error(fmt.Sprintf("failed to select activities: %v", err))
-			return fmt.Errorf("failed to select activities: %w", err)
-		}
-		var activitiesMetaData []SpeechMetaData
-
-		for _, activity := range activities {
-			var role Role
-			err = db.Get(&role, "SELECT * FROM roles WHERE id = $1", activity.RoleID)
-			if err != nil {
-				logger.Error(fmt.Sprintf("failed to select role: %v", err))
-				return fmt.Errorf("failed to select role: %w", err)
-			}
-			if !role.GroupID.Valid {
-				logger.Warn(fmt.Sprintf("skipping activity %d: role %d has no group", activity.ID, activity.RoleID))
-				continue
-			}
-			var groupName string
-			err = db.Get(&groupName, "SELECT name FROM parliamentary_groups WHERE id = $1", role.GroupID)
-			if err != nil {
-				logger.Error(fmt.Sprintf("failed to select group name: %v", err))
-				return fmt.Errorf("failed to select group name: %w", err)
-			}
-			var speakerName string = role.FirstName + " " + role.LastName + " (" + groupName + ")"
-			activitiesMetaData = append(activitiesMetaData, SpeechMetaData{
-				ActivityID:  activity.ID,
-				SpeakerName: speakerName,
-			})
-		}
-
-		err = processSpeechesIterative(protocol.Text, activitiesMetaData, db, logger)
+		err = processSpeechesIterative(protocol.ID, protocol.Text, db, logger)
 		if err != nil {
 			logger.Error(fmt.Sprintf("failed to process speeches for protocol %d: %v", protocol.ID, err))
 			return fmt.Errorf("failed to process speeches for protocol %d: %w", protocol.ID, err)
 		}
 		logger.Info(fmt.Sprintf("Successfully processed speeches for protocol %d", protocol.ID))
+
+		var count int
+		err = db.Get(&count, "SELECT COUNT(*) FROM activities a WHERE a.protocol_id = $1 AND a.type = 'Rede' AND (a.text IS NULL OR a.text = '')", protocol.ID)
+		if err != nil {
+			logger.Error(fmt.Sprintf("failed to check remaining speeches for protocol %d: %v", protocol.ID, err))
+			return fmt.Errorf("failed to check remaining speeches for protocol %d: %w", protocol.ID, err)
+		}
+		if count > 0 {
+			logger.Warn(fmt.Sprintf("There are still %d speeches without text for protocol %d", count, protocol.ID))
+		} else {
+			logger.Info(fmt.Sprintf("All speeches have been assigned for protocol %d", protocol.ID))
+		}
 	}
 	return nil
 }
