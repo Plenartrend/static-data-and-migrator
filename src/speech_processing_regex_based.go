@@ -303,71 +303,11 @@ Texts may be overlapping because an answer to a question may cause the texts to 
 You must return the first 3-4 sentences and the last 3-4 sentences of each speech in the original formatting, so I can programatically reconstruct the full speech. This uses less tokens than you returning the full speech. Therefore you must be CAREFUL TO MATCH EXACTLY THE ORIGINAL FORMATTING.
 `
 
-// findCandidatePositionsByWords searches for the needle word-by-word to find promising positions
-func findCandidatePositionsByWords(needle string, haystack string, logger *Logger) []int {
-	// Split needle into words
-	words := strings.Fields(needle)
-	if len(words) < 3 {
-		// Too few words, fall back to all word boundaries
-		return nil
-	}
-
-	// Search for each word and track positions
-	wordPositions := make([][]int, len(words))
-	for i, word := range words {
-		pos := 0
-		for {
-			idx := strings.Index(haystack[pos:], word)
-			if idx == -1 {
-				break
-			}
-			wordPositions[i] = append(wordPositions[i], pos+idx)
-			pos += idx + len(word)
-		}
-	}
-
-	// Find sequences where words appear in order (with some flexibility)
-	candidates := make(map[int]bool)
-	maxWordGap := 200 // Max characters between consecutive words
-
-	// Start with positions of the first word
-	for _, firstPos := range wordPositions[0] {
-		currentPos := firstPos
-		matchedWords := 1
-
-		// Try to find subsequent words
-		for wordIdx := 1; wordIdx < len(words); wordIdx++ {
-			found := false
-			for _, pos := range wordPositions[wordIdx] {
-				if pos > currentPos && pos-currentPos < maxWordGap {
-					currentPos = pos
-					matchedWords++
-					found = true
-					break
-				}
-			}
-			if !found {
-				break
-			}
-		}
-
-		// If we matched most words, this is a candidate position
-		if matchedWords >= len(words)*2/3 { // At least 2/3 of words matched
-			candidates[firstPos] = true
-		}
-	}
-
-	// Convert to slice
-	result := make([]int, 0, len(candidates))
-	for pos := range candidates {
-		result = append(result, pos)
-	}
-
-	return result
-}
-
-// findBestMatch uses Levenshtein distance to find the best matching substring
-// Optimized with word-by-word exact search first, then fuzzy matching only at candidate positions
+// findBestMatch uses a simple progressive word removal strategy with Levenshtein distance
+// 1. Try exact match of full needle
+// 2. If no match, progressively remove words from the end (10 words → 9 → 8 → ...)
+// 3. For each match found, calculate Levenshtein distance with the original needle
+// 4. Choose the match with lowest distance that satisfies maxDistanceRatio
 func findBestMatch(needle string, haystack string, maxDistanceRatio float64, logger *Logger) (startIdx int, found bool) {
 	startTime := time.Now()
 	needleLen := len(needle)
@@ -376,112 +316,178 @@ func findBestMatch(needle string, haystack string, maxDistanceRatio float64, log
 	logger.Debug(fmt.Sprintf("findBestMatch called: needleLen=%d, haystackLen=%d, maxDistanceRatio=%.2f", needleLen, haystackLen, maxDistanceRatio))
 
 	if needleLen == 0 || needleLen > haystackLen {
-		logger.Debug(fmt.Sprintf("findBestMatch: invalid input (needleLen=%d, haystackLen=%d)", needleLen, haystackLen))
+		logger.Warn(fmt.Sprintf("findBestMatch: invalid input (needleLen=%d, haystackLen=%d). Needle:\n%s", needleLen, haystackLen, needle))
 		return -1, false
 	}
 
 	maxDistance := int(float64(needleLen) * maxDistanceRatio)
-	bestDistance := maxDistance + 1
-	bestIdx := -1
+	words := strings.Fields(needle)
 
-	// First, try word-by-word exact search to find candidate positions
-	candidatePositions := findCandidatePositionsByWords(needle, haystack, logger)
+	// Try progressively shorter versions by removing words from the end
+	// Stop as soon as we find at least one match
+	var matchPositions []int
+	numWordsUsed := 0
+	wordsRemovedFromFront := 0
+	removedPrefixLen := 0
 
-	if len(candidatePositions) == 0 {
-		// Try progressively removing words from the beginning, but never more than 20% of the words
-		logger.Debug("Word-by-word search found no candidates, trying with words removed from beginning")
-		words := strings.Fields(needle)
+	// Phase 1: Remove words from the end
+	for numWords := len(words); numWords >= 3; numWords-- {
+		searchString := strings.Join(words[:numWords], " ")
 
-		if len(words) > 3 {
-			maxRemove := int(float64(len(words)) * 0.50)
-			if maxRemove < 1 {
-				maxRemove = 1
+		// Find all occurrences of this search string
+		matchPositions = nil // Reset for this iteration
+		pos := 0
+		for {
+			idx := strings.Index(haystack[pos:], searchString)
+			if idx == -1 {
+				break
 			}
-			if maxRemove > len(words)-3 {
-				maxRemove = len(words) - 3
-			}
-
-			for wordsToRemove := 1; wordsToRemove <= maxRemove; wordsToRemove++ {
-				shortenedNeedle := strings.Join(words[wordsToRemove:], " ")
-				candidatePositions = findCandidatePositionsByWords(shortenedNeedle, haystack, logger)
-
-				if len(candidatePositions) > 0 {
-					logger.Info(fmt.Sprintf("Found candidates after removing %d words from beginning", wordsToRemove))
-					break
-				}
-			}
+			matchPositions = append(matchPositions, pos+idx)
+			pos += idx + 1 // Move forward by 1 to find overlapping matches
 		}
 
-		if len(candidatePositions) == 0 {
-			duration := time.Since(startTime)
-			logger.Warn(fmt.Sprintf("findBestMatch: no candidates found even after progressive word removal in %v - skipping", duration))
-			return -1, false
+		if len(matchPositions) > 0 {
+			// Found matches! Stop removing words and use these
+			numWordsUsed = numWords
+			logger.Debug(fmt.Sprintf("findBestMatch: found %d matches with %d words (removed from end)", len(matchPositions), numWords))
+			break
 		}
-	} else {
-		logger.Debug(fmt.Sprintf("Word-by-word search found %d promising positions", len(candidatePositions)))
 	}
 
-	logger.Debug(fmt.Sprintf("findBestMatch: checking %d candidate positions", len(candidatePositions)))
+	// Phase 2: If no matches from removing from end, try removing from the front
+	if len(matchPositions) == 0 {
+		logger.Debug("findBestMatch: no matches by removing from end, trying to remove from front")
 
-	// Fast path: if there is only one candidate, try exact match without fuzzy search
-	if len(candidatePositions) == 1 {
-		pos := candidatePositions[0]
-		if pos+needleLen <= haystackLen {
-			window := haystack[pos : pos+needleLen]
-			distance := levenshtein.ComputeDistance(needle, window)
-			maxAllowed := int(float64(needleLen) * 0.25) // require at least 75% similarity
-			if distance <= maxAllowed {
-				duration := time.Since(startTime)
-				logger.Debug(fmt.Sprintf("findBestMatch: single candidate accepted at index %d with distance %d (maxAllowed=%d) in %v", pos, distance, maxAllowed, duration))
-				return pos, true
+		for numWordsToRemove := 1; numWordsToRemove <= len(words)-3; numWordsToRemove++ {
+			searchString := strings.Join(words[numWordsToRemove:], " ")
+			removedPrefix := strings.Join(words[:numWordsToRemove], " ") + " "
+
+			// Find all occurrences of this search string
+			matchPositions = nil // Reset for this iteration
+			pos := 0
+			for {
+				idx := strings.Index(haystack[pos:], searchString)
+				if idx == -1 {
+					break
+				}
+				matchPositions = append(matchPositions, pos+idx)
+				pos += idx + 1 // Move forward by 1 to find overlapping matches
 			}
-			// Distance too high
-			duration := time.Since(startTime)
-			logger.Warn(fmt.Sprintf("findBestMatch: single candidate distance %d exceeds maxAllowed %d (skipping) in %v", distance, maxAllowed, duration))
-			return -1, false
+
+			if len(matchPositions) > 0 {
+				// Found matches! Remember how many words we removed from front
+				wordsRemovedFromFront = numWordsToRemove
+				removedPrefixLen = len(removedPrefix)
+				numWordsUsed = len(words) - numWordsToRemove
+				logger.Debug(fmt.Sprintf("findBestMatch: found %d matches with %d words (removed %d from front)", len(matchPositions), numWordsUsed, wordsRemovedFromFront))
+				break
+			}
 		}
-		// Candidate beyond haystack bounds
+	}
+
+	// Phase 3: Last resort - try 3 words from the middle
+	if len(matchPositions) == 0 && len(words) >= 5 {
+		logger.Debug("findBestMatch: no matches by removing from end or front, trying 3 middle words")
+
+		// Calculate middle position
+		middleStart := (len(words) - 3) / 2
+		middleEnd := middleStart + 3
+		searchString := strings.Join(words[middleStart:middleEnd], " ")
+
+		// Calculate removed prefix (words before middle)
+		var removedPrefix string
+		if middleStart > 0 {
+			removedPrefix = strings.Join(words[:middleStart], " ") + " "
+		}
+
+		// Find all occurrences of this search string
+		matchPositions = nil
+		pos := 0
+		for {
+			idx := strings.Index(haystack[pos:], searchString)
+			if idx == -1 {
+				break
+			}
+			matchPositions = append(matchPositions, pos+idx)
+			pos += idx + 1
+		}
+
+		if len(matchPositions) > 0 {
+			// Found matches with middle words
+			wordsRemovedFromFront = middleStart
+			removedPrefixLen = len(removedPrefix)
+			numWordsUsed = 3
+			logger.Debug(fmt.Sprintf("findBestMatch: found %d matches with 3 middle words (offset by %d words from front)", len(matchPositions), wordsRemovedFromFront))
+		}
+	}
+
+	if len(matchPositions) == 0 {
 		duration := time.Since(startTime)
-		logger.Warn(fmt.Sprintf("findBestMatch: single candidate out of bounds (pos=%d, needleLen=%d, haystackLen=%d) in %v", pos, needleLen, haystackLen, duration))
+		needlePreview := needle
+		if len(needlePreview) > 200 {
+			needlePreview = needlePreview[:200] + "..."
+		}
+		logger.Warn(fmt.Sprintf("findBestMatch: no matches found even after trying end, front, and middle in %v. Needle:\n%s", duration, needlePreview))
 		return -1, false
 	}
 
-	// Try different window sizes around the needle length to account for small variations
-	for windowSize := needleLen - maxDistance; windowSize <= needleLen+maxDistance; windowSize++ {
-		if windowSize <= 0 || windowSize > haystackLen {
-			continue
+	// For each match, calculate Levenshtein distance with original needle and pick the best
+	bestDistance := maxDistance + 1
+	bestIdx := -1
+
+	for _, matchPos := range matchPositions {
+		// If we removed words from the front, adjust the position back
+		adjustedPos := matchPos
+		if wordsRemovedFromFront > 0 {
+			// Go back by the length of the removed prefix
+			adjustedPos = matchPos - removedPrefixLen
+			if adjustedPos < 0 {
+				continue // Can't go back that far
+			}
 		}
 
-		// Only check candidate positions
-		for _, pos := range candidatePositions {
-			if pos+windowSize > haystackLen {
-				continue
-			}
+		// Extract window of original needle length starting at adjusted position
+		if adjustedPos+needleLen > haystackLen {
+			continue // Not enough text left
+		}
 
-			window := haystack[pos : pos+windowSize]
-			distance := levenshtein.ComputeDistance(needle, window)
+		window := haystack[adjustedPos : adjustedPos+needleLen]
+		distance := levenshtein.ComputeDistance(needle, window)
 
-			if distance < bestDistance {
-				bestDistance = distance
-				bestIdx = pos
-			}
+		if distance < bestDistance {
+			bestDistance = distance
+			bestIdx = adjustedPos
+		}
 
-			// Early exit if we find an exact match
-			if distance == 0 {
-				duration := time.Since(startTime)
-				logger.Debug(fmt.Sprintf("findBestMatch: exact match found at index %d in %v", bestIdx, duration))
-				return bestIdx, true
-			}
+		// Early exit on exact match
+		if distance == 0 {
+			duration := time.Since(startTime)
+			logger.Debug(fmt.Sprintf("findBestMatch: exact match found at index %d in %v", bestIdx, duration))
+			return bestIdx, true
 		}
 	}
 
-	duration := time.Since(startTime)
+	// Check if best match is within acceptable distance
 	if bestIdx >= 0 && bestDistance <= maxDistance {
-		logger.Debug(fmt.Sprintf("findBestMatch: fuzzy match found at index %d with distance %d in %v", bestIdx, bestDistance, duration))
+		duration := time.Since(startTime)
+		if wordsRemovedFromFront > 0 {
+			if numWordsUsed == 3 {
+				logger.Debug(fmt.Sprintf("findBestMatch: fuzzy match found at index %d with distance %d (using 3 middle words, offset %d from front) in %v", bestIdx, bestDistance, wordsRemovedFromFront, duration))
+			} else {
+				logger.Debug(fmt.Sprintf("findBestMatch: fuzzy match found at index %d with distance %d (using %d words, removed %d from front) in %v", bestIdx, bestDistance, numWordsUsed, wordsRemovedFromFront, duration))
+			}
+		} else {
+			logger.Debug(fmt.Sprintf("findBestMatch: fuzzy match found at index %d with distance %d (using %d words) in %v", bestIdx, bestDistance, numWordsUsed, duration))
+		}
 		return bestIdx, true
 	}
 
-	logger.Debug(fmt.Sprintf("findBestMatch: no match found (bestDistance=%d > maxDistance=%d) in %v", bestDistance, maxDistance, duration))
+	duration := time.Since(startTime)
+	needlePreview := needle
+	if len(needlePreview) > 200 {
+		needlePreview = needlePreview[:200] + "..."
+	}
+	logger.Warn(fmt.Sprintf("findBestMatch: no acceptable match found (bestDistance=%d > maxDistance=%d) in %v. Needle:\n%s", bestDistance, maxDistance, duration, needlePreview))
 	return -1, false
 }
 
@@ -498,10 +504,10 @@ func getSpeechByStartAndEnd(firstSentences string, lastSentences string, protoco
 	// Try exact match first
 	startIdx := strings.Index(text, firstSentences)
 	if startIdx == -1 {
-		// Fall back to fuzzy matching with 20% tolerance
+		// Fall back to fuzzy matching with 30% tolerance
 		logger.Debug("Exact match failed for start, trying fuzzy match")
 		var found bool
-		startIdx, found = findBestMatch(firstSentences, text, 0.2, logger)
+		startIdx, found = findBestMatch(firstSentences, text, 0.25, logger)
 		if !found {
 			// Log detailed information for debugging - this is expected to happen sometimes
 			protocolPreview := text
@@ -522,7 +528,7 @@ func getSpeechByStartAndEnd(firstSentences string, lastSentences string, protoco
 		// Fall back to fuzzy matching for end
 		logger.Debug("Exact match failed for end, trying fuzzy match")
 		var found bool
-		endIdx, found = findBestMatch(lastSentences, endSearchText, 0.2, logger)
+		endIdx, found = findBestMatch(lastSentences, endSearchText, 0.25, logger)
 		if !found {
 			// Log detailed information for debugging - this is expected to happen sometimes
 			protocolPreview := endSearchText
@@ -538,6 +544,7 @@ func getSpeechByStartAndEnd(firstSentences string, lastSentences string, protoco
 	endIdx = startIdx + endIdx + len(lastSentences)
 
 	if endIdx <= startIdx {
+		logger.Warn(fmt.Sprintf("Invalid speech boundaries: start=%d, end=%d. Start text:\n%s\nEnd text:\n%s", startIdx, endIdx, firstSentences, lastSentences))
 		return "", fmt.Errorf("invalid speech boundaries: start=%d, end=%d", startIdx, endIdx)
 	}
 

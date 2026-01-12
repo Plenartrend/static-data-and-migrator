@@ -96,7 +96,7 @@ func getResponseSchema() *genai.Schema {
 					},
 					"beginning_too_short": {
 						Type:        "boolean",
-						Description: "Indicates if the beginning of the speech is too short or generic because the text was truncated. Only set to true if the beginning is very likely too generic to identify the text. Also include interruptions by others like interjections or clapping if they are in the original text.",
+						Description: "Indicates if the beginning of the speech is too short or generic because the text was truncated. Only set to true if the beginning is very likely too generic to identify the text. ONLY do this if you are really sure that the beginning is too short, as this can lead to errors.",
 					},
 				},
 			},
@@ -308,7 +308,7 @@ func assignSpeechesToActivitiesIterative() error {
 	var protocols []Protocol
 	// TODO only check for activities of the 'Rede' type
 	//err = db.Select(&protocols, "SELECT * FROM protocols p WHERE EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
-	err = db.Select(&protocols, "SELECT * FROM protocols p WHERE p.ID = 5733 AND EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
+	err = db.Select(&protocols, "SELECT * FROM protocols p WHERE p.ID = 5626 AND EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
 	if err != nil {
 		logger.Error(fmt.Sprintf("failed to select protocols: %v", err))
 		return fmt.Errorf("failed to select protocols: %w", err)
