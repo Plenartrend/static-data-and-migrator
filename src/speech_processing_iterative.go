@@ -18,7 +18,6 @@ type PreviouslyUnfinishedSpeech struct {
 	Speaker           string
 	SpeechStart       string
 	BeginningTooShort bool
-	ChunksText        string // Concatenated chunks containing the unfinished speech
 }
 
 const iterativeInstructionText = `
@@ -47,7 +46,7 @@ CRITICAL RULES - EXACT SUBSTRING EXTRACTION:
 - DO NOT add or remove any characters, spaces, or newlines
 - DO NOT CHANGE THE CASING OF ANY LETTER
 - EVERY character must match the original PERFECTLY
-- The rule is: As few words as possible, but as many as necessary for exact matching; but not more than 30.
+- The rule is: AS FEW WORDS AS POSSIBLE, BUT AS MANY AS NECESSARY TO IDENTIFY THE SPEECH; NEVER MORE THAN 30 WORDS.
 `
 
 const chunkSize = 50_000
@@ -154,7 +153,6 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 		Speaker:           "",
 		SpeechStart:       "",
 		BeginningTooShort: false,
-		ChunksText:        "",
 	}
 
 	startTime := time.Now()
@@ -170,9 +168,7 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 		if previouslyUnfinishedSpeech.Present {
 			contextText = "The previous chunk contained an unfinished speech by " + previouslyUnfinishedSpeech.Speaker + ". It started with: " + previouslyUnfinishedSpeech.SpeechStart
 			if previouslyUnfinishedSpeech.BeginningTooShort == true {
-				contextText += ". The previous chunk stopped at a hard boundary (possibly mid-word). This chunk starts EXACTLY where the previous chunk ended. DO NOT add spaces or merge text. Find where the previous text ends in this chunk and continue from there EXACTLY."
-			} else {
-				contextText += ". The previous chunk stopped at a hard boundary. This chunk starts EXACTLY where the previous chunk ended. Continue the speech from the beginning of this chunk."
+				contextText += ". The previous chunk stopped at a hard boundary (possibly mid-word). This chunk starts EXACTLY where the previous chunk ended. You must add a few words from the beginning of this chunk to speech_text_start until the total is 15-30 words. DO NOT ADD SPACES OR SIMILAR, APPEND IMMEDEATELY AT THE END OF speech_text_start."
 			}
 			contextText += "\n"
 		} else {
@@ -259,25 +255,14 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 			beginOfSpeechStart := startedSpeechMap["begin_of_speech_start"].(string)
 			beginningTooShort := startedSpeechMap["beginning_too_short"].(bool)
 
-			// Store or concatenate chunks text
-			var chunksText string
-			if previouslyUnfinishedSpeech.Present && previouslyUnfinishedSpeech.Speaker == speaker {
-				// Continuing same speech, concatenate chunks
-				chunksText = previouslyUnfinishedSpeech.ChunksText + chunk
-			} else {
-				// New speech, start fresh with current chunk
-				chunksText = chunk
-			}
-
 			previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{
 				Present:           true,
 				Speaker:           speaker,
 				SpeechStart:       beginOfSpeechStart,
 				BeginningTooShort: beginningTooShort,
-				ChunksText:        chunksText,
 			}
 
-			logger.Info(fmt.Sprintf("Started new unfinished speech for Speaker %s (chunks len=%d)", speaker, len(chunksText)))
+			logger.Info(fmt.Sprintf("Started/continuing unfinished speech for Speaker %s", speaker))
 		} else {
 			previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
 		}
@@ -308,7 +293,7 @@ func assignSpeechesToActivitiesIterative() error {
 	var protocols []Protocol
 	// TODO only check for activities of the 'Rede' type
 	//err = db.Select(&protocols, "SELECT * FROM protocols p WHERE EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
-	err = db.Select(&protocols, "SELECT * FROM protocols p WHERE p.ID = 5626 AND EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
+	err = db.Select(&protocols, "SELECT * FROM protocols p WHERE p.ID = 5733 AND EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
 	if err != nil {
 		logger.Error(fmt.Sprintf("failed to select protocols: %v", err))
 		return fmt.Errorf("failed to select protocols: %w", err)
