@@ -12,6 +12,16 @@ import (
 	_ "github.com/lib/pq"
 )
 
+type ActivitiesTexts struct {
+	Activities []int
+	Texts      []string
+	Speaker    string
+}
+
+type ActivitiesTextsChan chan ActivitiesTexts
+
+var activitiesTextsChan chan ActivitiesTexts = nil
+
 func main() {
 
 	err := godotenv.Load()
@@ -24,6 +34,28 @@ func main() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer db.Close()
+
+	activitiesTextsChan = make(chan ActivitiesTexts)
+
+	for i := 0; i < 8; i++ {
+		go func(workerId int) {
+			consoleLogLevel := Debug
+			logger := NewLogger(db, &consoleLogLevel, nil)
+			for activitiesTexts := range activitiesTextsChan {
+				texts, err := processSpeeches(activitiesTexts.Texts, activitiesTexts.Speaker, activitiesTexts.Activities, logger)
+				if err != nil {
+					logger.Error(fmt.Sprintf("failed to process speeches: %v", err))
+				}
+				for activityID, text := range texts {
+					_, err = db.Exec("UPDATE activities SET text = $1 WHERE id = $2", text, activityID)
+					if err != nil {
+						logger.Error(fmt.Sprintf("failed to update activity text: %v", err))
+					}
+				}
+			}
+
+		}(i)
+	}
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -80,7 +112,7 @@ func main() {
 	})
 
 	http.HandleFunc("/test-gemini", func(w http.ResponseWriter, r *http.Request) {
-		test()
+		testAiClient()
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "Test completed successfully")
 	})

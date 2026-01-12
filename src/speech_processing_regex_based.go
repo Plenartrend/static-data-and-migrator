@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 
+	"github.com/jmoiron/sqlx"
 	"google.golang.org/genai"
 )
 
 var geminiClient *genai.Client = nil // lazy initialized
 
+// TODO: Initialize once on main startup
 func getGeminiClient() (*genai.Client, error) {
 	var err error = nil
 	if geminiClient == nil {
@@ -138,7 +141,103 @@ func processSpeeches(speeches []string, speakerName string, activities []int, lo
 	return resultMap, nil
 }
 
-func test() {
+// TODO: Merge overlapping speeches
+func getRelevantPartsOfSpeechForSpeaker(speakerName string, protocol *Protocol) ([]string, error) {
+	if protocol == nil {
+		return nil, fmt.Errorf("protocol cannot be nil")
+	}
+	text := protocol.Text
+
+	//namePattern := `([A-ZÄÖÜ][a-zäöüß]+(?:[\s\n]+[A-ZÄÖÜ][a-zäöüß]+)*)[\s\n]+([A-ZÄÖÜ][a-zäöüß]+)(?:[\s\n]*)\((.{1,30})\):`
+	namePattern := regexp.QuoteMeta(speakerName) + ":.{0,1000}"
+	re := regexp.MustCompile(namePattern)
+
+	matches := re.FindAllStringIndex(text, -1)
+
+	if len(matches) == 0 {
+		return nil, nil // No matches
+	}
+
+	result := []string{}
+	for _, match := range matches {
+		endIndex := min(match[1]+11000, len(text))
+		result = append(result, text[match[0]:endIndex])
+	}
+
+	return result, nil
+}
+
+// TODO: Get Firstname, Lastname, Groupname. Actually we need group shortname, but it seems so far we only safe long name?
+func assignSpeechesToActivities() error {
+	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	defer db.Close()
+
+	consoleLogLevel := Debug
+	logger := NewLogger(db, &consoleLogLevel, nil)
+
+	var protocols []Protocol
+	//err = db.Select(&protocols, "SELECT * FROM protocols p WHERE EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
+	err = db.Select(&protocols, "SELECT * FROM protocols p WHERE p.ID = 5626 AND EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to select protocols: %v", err))
+		return fmt.Errorf("failed to select protocols: %w", err)
+	}
+
+	for _, protocol := range protocols {
+		var activities []Activity
+		//err = db.Select(&activities, "SELECT * FROM activities a WHERE protocol_id = $1 AND a.type = 'Rede' AND (text IS NULL OR text = '')", protocol.ID)
+		err = db.Select(&activities, "SELECT * FROM activities a WHERE protocol_id = $1 AND a.type = 'Rede' AND (text IS NULL OR text = '') LIMIT 5", protocol.ID)
+		logger.Debug(fmt.Sprintf("Found %d activities for protocol %d", len(activities), protocol.ID))
+		if err != nil {
+			logger.Error(fmt.Sprintf("failed to select activities: %v", err))
+			return fmt.Errorf("failed to select activities: %w", err)
+		}
+		var activitiesGroupedBySpeaker = make(map[string][]Activity)
+		for _, activity := range activities {
+			var role Role
+			err = db.Get(&role, "SELECT * FROM roles WHERE id = $1", activity.RoleID)
+			if err != nil {
+				logger.Error(fmt.Sprintf("failed to select role: %v", err))
+				return fmt.Errorf("failed to select role: %w", err)
+			}
+			if !role.GroupID.Valid {
+				logger.Warn(fmt.Sprintf("skipping activity %d: role %d has no group", activity.ID, activity.RoleID))
+				continue
+			}
+			var groupName string
+			err = db.Get(&groupName, "SELECT name FROM parliamentary_groups WHERE id = $1", role.GroupID)
+			if err != nil {
+				logger.Error(fmt.Sprintf("failed to select group name: %v", err))
+				return fmt.Errorf("failed to select group name: %w", err)
+			}
+			var speakerName string = role.FirstName + " " + role.LastName + " (" + groupName + ")"
+			activitiesGroupedBySpeaker[speakerName] = append(activitiesGroupedBySpeaker[speakerName], activity)
+		}
+
+		for speaker, activities := range activitiesGroupedBySpeaker {
+			activityIDs := []int{}
+			for _, activity := range activities {
+				activityIDs = append(activityIDs, activity.ID)
+			}
+			speeches, err := getRelevantPartsOfSpeechForSpeaker(speaker, &protocol)
+			if err != nil {
+				logger.Error(fmt.Sprintf("failed to get speeches for activities: %v", err))
+				return fmt.Errorf("failed to get speeches for activities: %w", err)
+			}
+			activitiesTextsChan <- ActivitiesTexts{
+				Activities: activityIDs,
+				Texts:      speeches,
+				Speaker:    speaker,
+			}
+		}
+	}
+	return nil
+}
+
+func testAiClient() {
 	client, err := genai.NewClient(context.Background(), &genai.ClientConfig{
 		APIKey:  os.Getenv("GEMINI_API_KEY"),
 		Backend: genai.BackendGeminiAPI,
