@@ -16,6 +16,7 @@ type ActivitiesTexts struct {
 	Activities []int
 	Texts      []string
 	Speaker    string
+	Protocol   *Protocol
 }
 
 type ActivitiesTextsChan chan ActivitiesTexts
@@ -42,7 +43,7 @@ func main() {
 			consoleLogLevel := Debug
 			logger := NewLogger(db, &consoleLogLevel, nil)
 			for activitiesTexts := range activitiesTextsChan {
-				texts, err := processSpeeches(activitiesTexts.Texts, activitiesTexts.Speaker, activitiesTexts.Activities, logger)
+				texts, err := processSpeeches(activitiesTexts.Texts, activitiesTexts.Speaker, activitiesTexts.Activities, activitiesTexts.Protocol, logger)
 				if err != nil {
 					logger.Error(fmt.Sprintf("failed to process speeches: %v", err))
 				}
