@@ -61,7 +61,7 @@ func getResponseSchema() *genai.Schema {
 					Properties: map[string]*genai.Schema{
 						"speaker": {
 							Type:        "string",
-							Description: "The full name of the speaker that gave the speech. Do NOT include titles like 'Dr.' or 'Prof.'",
+							Description: "The full name of the speaker that gave the speech. Do NOT INCLUDE titles like 'Dr.' or 'Prof.'",
 						},
 						"speech_text_start": {
 							Type:        "string",
@@ -84,7 +84,7 @@ func getResponseSchema() *genai.Schema {
 					},
 					"speaker": {
 						Type:        "string",
-						Description: "The full name of the speaker that gave the started speech. Do NOT include titles like 'Dr.' or 'Prof.'",
+						Description: "The full name of the speaker that gave the started speech. Do NOT INCLUDE titles like 'Dr.' or 'Prof.'",
 					},
 					"begin_of_speech_start": {
 						Type:        "string",
@@ -173,8 +173,9 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 		}
 
 		if i > 0 {
-			previousChunk := protocolText[max(0, i-chunkSize):i]
-			contextText += "The end of the previous chunk is:\n" + previousChunk + "\n\n"
+			prevChunkStart := max(0, i-1000)
+			endOfPreviousChunk := protocolText[prevChunkStart:i]
+			contextText += "The end of the previous chunk is:\n" + endOfPreviousChunk + "\n\n"
 		}
 
 		content := []*genai.Content{
