@@ -21,16 +21,13 @@ type PreviouslyUnfinishedSpeech struct {
 }
 
 const iterativeInstructionText = `
-You will receive a chunk of a German parliamentary protocol. Your task is to extract speeches.
+You will receive a chunk of a German parliamentary protocol along with the end of the previous chunk. Your task is to extract speeches.
 A speech is the full statement of one person, including any interruptions (e.g., questions or interjections by others), WHICH ALWAYS SHOULD BE INCLUDED AS PART OF THE SPEECH.
 
-IMPORTANT: Chunks are split at hard boundaries. The previous chunk stopped at an exact character position, and this chunk starts exactly where the previous one ended. There is NO overlap. The text continues directly from where it was cut (possibly mid-word).
-
-1. Identify speeches that start and end within this chunk. For each, return the speaker's full name, the first 15-30 words, and the last 15-30 words of the speech. If the beginning is very generic use closer to 30 words, else closer to 15.
+1. Identify speeches that start and end within this chunk (not the previous chunk). For each, return the speaker's full name, the first 15-30 words, and the last 15-30 words of the speech. If the beginning is very generic use closer to 30 words, else closer to 15.
 2. If a speech starts in this chunk but does not end, return the speaker's full name and the first 15-30 words if possible.
-3. If a speech started in a previous chunk and continues here, you already received the beginning of the speech. If the beginning is flagged as too short or generic,
-the text was cut at an arbitrary point (possibly mid-word). This chunk continues EXACTLY from that point - DO NOT add spaces but simply concat the beginning of this chunk until the TOTAL beginning is 15 to at most 30 words.
-Return the speech either in the completed section or in the "started" section if its still not complete, and use the concatinated speech_text_start as the speech_text_start.
+3. If a speech started in a previous chunk and continues here, you already received the beginning of the speech. If the beginning is flagged as too short or generic, expand it with the beginning of this chunk until it is 15-30 words long in total. Make sure to not add any spaces or similar, the result should be verbatim from the original text.
+Return the speech in the completed section if it is complete, or in the "started" section if it is still not complete.
 
 "Speaker's full name" refers to the format "FirstName LastName" with no titles, honorifics, or party affiliations.
 Speeches always begin with the speaker being named (e.g., "Dr. Angela Merkel (CDU/CSU):").
@@ -95,7 +92,7 @@ func getResponseSchema() *genai.Schema {
 					},
 					"beginning_too_short": {
 						Type:        "boolean",
-						Description: "Indicates if the beginning of the speech is too short or generic because the text was truncated. Only set to true if the beginning is very likely too generic to identify the text. ONLY do this if you are really sure that the beginning is too short, as this can lead to errors.",
+						Description: "Indicates if the beginning of the speech is too short or generic because the chunk ended soon after the beginning. Only set to true if the beginning is very likely too generic to identify the text. ONLY do this if you are really sure that the beginning is too short, as this can lead to errors.",
 					},
 				},
 			},
@@ -168,11 +165,16 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 		if previouslyUnfinishedSpeech.Present {
 			contextText = "The previous chunk contained an unfinished speech by " + previouslyUnfinishedSpeech.Speaker + ". It started with: " + previouslyUnfinishedSpeech.SpeechStart
 			if previouslyUnfinishedSpeech.BeginningTooShort == true {
-				contextText += ". The previous chunk stopped at a hard boundary (possibly mid-word). This chunk starts EXACTLY where the previous chunk ended. You must add a few words from the beginning of this chunk to speech_text_start until the total is 15-30 words. DO NOT ADD SPACES OR SIMILAR, APPEND IMMEDEATELY AT THE END OF speech_text_start."
+				contextText += ". The previous chunk did not contain enough words of the new speech to provide an unambiguous start string. This chunk starts EXACTLY where the previous chunk ended. You must add a few words from the beginning of this chunk to speech_text_start until the total is 15-30 words. DO NOT ADD SPACES OR SIMILAR, APPEND IMMEDEATELY AT THE END OF speech_text_start."
 			}
-			contextText += "\n"
+			contextText += "\n\n"
 		} else {
-			contextText = "The previous chunk did NOT contain an unfinished speech.\n"
+			contextText = "The previous chunk did NOT contain an unfinished speech.\n\n"
+		}
+
+		if i > 0 {
+			previousChunk := protocolText[max(0, i-chunkSize):i]
+			contextText += "The end of the previous chunk is:\n" + previousChunk + "\n\n"
 		}
 
 		content := []*genai.Content{
