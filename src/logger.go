@@ -21,9 +21,10 @@ type Logger struct {
 	db               *sqlx.DB
 	minConsoleLevel  LogStatus
 	minDatabaseLevel LogStatus
+	prefix           string
 }
 
-func NewLogger(db *sqlx.DB, minConsoleLevel *LogStatus, minDatabaseLevel *LogStatus) *Logger {
+func NewLogger(db *sqlx.DB, minConsoleLevel *LogStatus, minDatabaseLevel *LogStatus, prefix ...string) *Logger {
 	defaultLevel := Info
 	if minConsoleLevel == nil {
 		minConsoleLevel = &defaultLevel
@@ -31,12 +32,40 @@ func NewLogger(db *sqlx.DB, minConsoleLevel *LogStatus, minDatabaseLevel *LogSta
 	if minDatabaseLevel == nil {
 		minDatabaseLevel = &defaultLevel
 	}
-	return &Logger{db: db, minConsoleLevel: *minConsoleLevel, minDatabaseLevel: *minDatabaseLevel}
+	loggerPrefix := ""
+	if len(prefix) > 0 && prefix[0] != "" {
+		loggerPrefix = prefix[0]
+	}
+	return &Logger{db: db, minConsoleLevel: *minConsoleLevel, minDatabaseLevel: *minDatabaseLevel, prefix: loggerPrefix}
+}
+
+func (l *Logger) SetPrefix(prefix string) {
+	l.prefix = prefix
+}
+
+func (l *Logger) GetPrefix() string {
+	return l.prefix
+}
+
+func (l *Logger) AppendPrefix(additionalPrefix string) {
+	if l.prefix == "" {
+		l.prefix = additionalPrefix
+	} else {
+		l.prefix = l.prefix + " - " + additionalPrefix
+	}
+}
+
+func (l *Logger) formatMessage(message string) string {
+	if l.prefix == "" {
+		return message
+	}
+	return l.prefix + " - " + message
 }
 
 func (l *Logger) Debug(message string) {
+	formattedMessage := l.formatMessage(message)
 	if l.minConsoleLevel <= Debug {
-		fmt.Println("DEBUG: ", message)
+		fmt.Println("DEBUG: ", formattedMessage)
 	}
 	if l.minDatabaseLevel <= Debug {
 		l.Log("debug", message)
@@ -44,8 +73,9 @@ func (l *Logger) Debug(message string) {
 }
 
 func (l *Logger) Info(message string) {
+	formattedMessage := l.formatMessage(message)
 	if l.minConsoleLevel <= Info {
-		fmt.Println("INFO: ", message)
+		fmt.Println("INFO: ", formattedMessage)
 	}
 	if l.minDatabaseLevel <= Info {
 		l.Log("info", message)
@@ -53,8 +83,9 @@ func (l *Logger) Info(message string) {
 }
 
 func (l *Logger) Warn(message string) {
+	formattedMessage := l.formatMessage(message)
 	if l.minConsoleLevel <= Warn {
-		fmt.Println("WARN: ", message)
+		fmt.Println("WARN: ", formattedMessage)
 	}
 	if l.minDatabaseLevel <= Warn {
 		l.Log("warn", message)
@@ -62,8 +93,9 @@ func (l *Logger) Warn(message string) {
 }
 
 func (l *Logger) Error(message string) {
+	formattedMessage := l.formatMessage(message)
 	if l.minConsoleLevel <= Error {
-		fmt.Println("ERROR: ", message)
+		fmt.Println("ERROR: ", formattedMessage)
 	}
 	if l.minDatabaseLevel <= Error {
 		l.Log("error", message)
@@ -71,11 +103,12 @@ func (l *Logger) Error(message string) {
 }
 
 func (l *Logger) Fatal(message string) {
+	formattedMessage := l.formatMessage(message)
 	if l.minDatabaseLevel <= Fatal {
 		l.Log("fatal", message)
 	}
 	if l.minConsoleLevel <= Fatal {
-		fmt.Println("FATAL: ", message)
+		fmt.Println("FATAL: ", formattedMessage)
 		panic(message)
 	}
 }

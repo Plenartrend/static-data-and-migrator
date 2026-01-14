@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -23,6 +24,8 @@ type ActivitiesTextsChan chan ActivitiesTexts
 
 var activitiesTextsChan chan ActivitiesTexts = nil
 
+var assignSpeechesToActivitiesWorkerRunning = false
+
 func main() {
 
 	err := godotenv.Load()
@@ -40,21 +43,30 @@ func main() {
 
 	for i := 0; i < 8; i++ {
 		go func(workerId int) {
-			consoleLogLevel := Debug
-			logger := NewLogger(db, &consoleLogLevel, nil)
-			for activitiesTexts := range activitiesTextsChan {
-				texts, err := processSpeeches(activitiesTexts.Texts, activitiesTexts.Speaker, activitiesTexts.Activities, activitiesTexts.Protocol, logger)
-				if err != nil {
-					logger.Error(fmt.Sprintf("failed to process speeches: %v", err))
+			count := 0
+			workerPrefix := fmt.Sprintf("Worker %d", workerId)
+			fmt.Fprintf(os.Stdout, "Worker %d started\n", workerId)
+			logger := NewLogger(db, nil, nil, workerPrefix)
+			for count < 3 {
+				if !assignSpeechesToActivitiesWorkerRunning {
+					time.Sleep(1 * time.Second)
+					continue
 				}
-				for activityID, text := range texts {
-					_, err = db.Exec("UPDATE activities SET text = $1 WHERE id = $2", text, activityID)
-					if err != nil {
-						logger.Error(fmt.Sprintf("failed to update activity text: %v", err))
-					}
+				count++
+				shouldWait, err := processNextProtocol(logger)
+				if err != nil {
+					logger.Error(fmt.Sprintf("failed to assign speeches to activities: %v", err))
+				}
+				logger.SetPrefix(workerPrefix)
+				if shouldWait {
+					time.Sleep(1 * time.Minute)
+					fmt.Fprintf(os.Stdout, "Worker %d sleeping for 1 minute\n", workerId)
 				}
 			}
-
+			for {
+				fmt.Fprintf(os.Stdout, "Worker %d finished\n", workerId)
+				time.Sleep(1 * time.Minute)
+			}
 		}(i)
 	}
 
@@ -106,12 +118,6 @@ func main() {
 		fmt.Fprint(w, "Data ingested successfully")
 	})
 
-	http.HandleFunc("/assign-speeches", func(w http.ResponseWriter, r *http.Request) {
-		assignSpeechesToActivities()
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "Speeches assigned to activities successfully")
-	})
-
 	http.HandleFunc("/test-gemini", func(w http.ResponseWriter, r *http.Request) {
 		testAiClient()
 		w.WriteHeader(http.StatusOK)
@@ -119,7 +125,7 @@ func main() {
 	})
 
 	http.HandleFunc("/assign-speeches-iterative", func(w http.ResponseWriter, r *http.Request) {
-		err := assignSpeechesToActivitiesIterative()
+		_, err := processNextProtocol(nil)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprint(w, "Failed to assign speeches iteratively", err)
@@ -127,6 +133,17 @@ func main() {
 		}
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "Speeches assigned to activities iteratively successfully")
+	})
+
+	http.HandleFunc("/assign-speeches", func(w http.ResponseWriter, r *http.Request) {
+		start := r.URL.Query().Get("start") == "true"
+		if start {
+			assignSpeechesToActivitiesWorkerRunning = true
+		} else {
+			assignSpeechesToActivitiesWorkerRunning = false
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "Speeches assignment status updated with start="+strconv.FormatBool(start))
 	})
 
 	log.Println("Server starting on :8080")

@@ -20,7 +20,7 @@ type PreviouslyUnfinishedSpeech struct {
 	BeginningTooShort bool
 }
 
-const iterativeInstructionText = `
+const systemInstruction = `
 You will receive a chunk of a German parliamentary protocol along with the end of the previous chunk. Your task is to extract speeches.
 A speech is the full statement of one person, including any interruptions (e.g., questions or interjections by others), WHICH ALWAYS SHOULD BE INCLUDED AS PART OF THE SPEECH.
 
@@ -126,11 +126,9 @@ func addTextToActivity(protocolId int, speaker string, speech string, db DBInter
 	return nil
 }
 
-// TODO use db transaction
-func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger) error {
-	// Reset global counter for unmatched speeches at the start of each run
-	unmatchedSpeechesCount = 0
+func processSpeeches(protocol *Protocol, db DBInterface, logger *Logger) error {
 
+	var unmatchedSpeechesCount int = 0
 	protocolText := protocol.Text
 	protocolId := protocol.ID
 	client, err := getGeminiClient()
@@ -141,7 +139,7 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 
 	systemInstruction := &genai.Content{
 		Parts: []*genai.Part{
-			{Text: iterativeInstructionText},
+			{Text: systemInstruction},
 		},
 	}
 
@@ -156,6 +154,7 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 	updatedActivities := 0
 
 	for i := 0; i < len(protocolText); i += chunkSize {
+
 		end := min(i+chunkSize, len(protocolText))
 		chunk := protocolText[i:end]
 
@@ -204,7 +203,6 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 			return err
 		}
 
-		// Log the raw model response
 		responseText := resp.Text()
 		logger.Debug(fmt.Sprintf("Gemini model response (length=%d): %s", len(responseText), responseText))
 
@@ -215,7 +213,6 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 
 		logger.Debug(fmt.Sprintf("Parsed response: %+v", resultMap))
 
-		// Handle complete_speeches
 		completeSpeechesArray := resultMap["complete_speeches"].([]any)
 		for _, speechEntry := range completeSpeechesArray {
 			speechMap := speechEntry.(map[string]any)
@@ -223,17 +220,15 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 			speechTextStart := speechMap["speech_text_start"].(string)
 			speechTextEnd := speechMap["speech_text_end"].(string)
 
-			// Reconstruct the full speech using start and end (with fuzzy matching)
-			// Searches in full protocol (optimized with word-by-word search, so only a few candidates are checked)
+			// Reconstruct the full speech using start and end
 			fullSpeech, err := getSpeechByStartAndEnd(speechTextStart, speechTextEnd, protocol, logger)
 			if err != nil {
 				logger.Warn(fmt.Sprintf("Skipping speech for speaker %s: %v", speaker, err))
 				unmatchedSpeechesCount++
-				// Clear previously unfinished speech if this was supposed to complete it
 				if previouslyUnfinishedSpeech.Present && previouslyUnfinishedSpeech.Speaker == speaker {
 					previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
 				}
-				continue // Skip this speech and continue with others
+				continue
 			}
 
 			logger.Info(fmt.Sprintf("Complete speech for Speaker %s (length=%d)", speaker, len(fullSpeech)))
@@ -243,13 +238,11 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 			}
 			updatedActivities++
 
-			// If this completed a previously unfinished speech, clear it
 			if previouslyUnfinishedSpeech.Present && previouslyUnfinishedSpeech.Speaker == speaker {
 				previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
 			}
 		}
 
-		// Handle started_speech
 		startedSpeechMap := resultMap["started_speech"].(map[string]any)
 		startedSpeechPresent := startedSpeechMap["present"].(bool)
 
@@ -271,56 +264,124 @@ func processSpeechesIterative(protocol *Protocol, db DBInterface, logger *Logger
 		}
 
 		logger.Info(fmt.Sprintf("Finished processing chunk from index %d to %d. Updated %d activities", i, end, updatedActivities))
-		//if i >= 10_000 {
-		//	break
-		//}
 	}
-
 	logger.Info(fmt.Sprintf("Completed processing all chunks in %s", time.Since(startTime)))
 	logger.Info(fmt.Sprintf("Total unmatched speeches (could not be matched at all): %d", unmatchedSpeechesCount))
 
 	return nil
 }
 
-func assignSpeechesToActivitiesIterative() error {
+func processNextProtocol(logger *Logger) (bool, error) {
 	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {
-		return fmt.Errorf("failed to connect to database: %w", err)
+		return true, fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
 
-	consoleLogLevel := Debug
-	databaseLogLevel := Debug
-	logger := NewLogger(db, &consoleLogLevel, &databaseLogLevel)
-
-	var protocols []Protocol
-	// TODO only check for activities of the 'Rede' type
-	//err = db.Select(&protocols, "SELECT * FROM protocols p WHERE EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
-	err = db.Select(&protocols, "SELECT * FROM protocols p WHERE p.ID = 5733 AND EXISTS (SELECT 1 FROM activities a WHERE a.protocol_id = p.id AND a.text IS NULL OR a.text = '')")
-	if err != nil {
-		logger.Error(fmt.Sprintf("failed to select protocols: %v", err))
-		return fmt.Errorf("failed to select protocols: %w", err)
+	if logger == nil {
+		logger = NewLogger(db, nil, nil)
 	}
 
-	for _, protocol := range protocols {
-		err = processSpeechesIterative(&protocol, db, logger)
+	var protocols []Protocol
+	query := `
+		WITH to_update AS (
+			SELECT p.id
+			FROM protocols p
+			WHERE
+				(
+					EXISTS (
+						SELECT 1
+						FROM activities a
+						WHERE a.protocol_id = p.id AND (a.text IS NULL OR a.text = '')
+					)
+						AND p.processing_status = 'not_started'
+					)
+			OR (
+				p.processing_status = 'failed'
+					AND (
+					p.failed_count = 1
+						OR (
+						p.failed_count = 2
+							AND (now() - p.processing_timestamp > interval '1 hour')
+						)
+					)
+				)
+			OR (
+				p.processing_status = 'in_progress'
+					AND (now() - p.processing_timestamp > interval '1 hour')
+				)
+			AND p.text IS NOT NULL AND p.text != ''
+			ORDER BY p.date DESC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE protocols p
+		SET processing_status = 'in_progress', 
+			processing_timestamp = now()
+		FROM to_update t
+		WHERE p.id = t.id
+		RETURNING p.*;
+		`
+	handleError := func(protocolID int, err error, logger *Logger) {
+		logger.Error(fmt.Sprintf("failed to process speeches for protocol %d: %v", protocolID, err))
+		_, err = db.Exec("UPDATE protocols SET processing_status = 'failed', failed_count = failed_count + 1 WHERE id = $1", protocolID)
 		if err != nil {
-			logger.Error(fmt.Sprintf("failed to process speeches for protocol %d: %v", protocol.ID, err))
-			return fmt.Errorf("failed to process speeches for protocol %d: %w", protocol.ID, err)
+			logger.Error(fmt.Sprintf("failed to update protocol %d: %v", protocolID, err))
 		}
-		logger.Info(fmt.Sprintf("Successfully processed speeches for protocol %d", protocol.ID))
+	}
+
+	err = db.Select(&protocols, query)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to select protocols: %v", err))
+		return true, fmt.Errorf("failed to select protocols: %w", err)
+	}
+
+	//Len at most 1
+	for _, protocol := range protocols {
+		logger.AppendPrefix(fmt.Sprintf("protocol %d", protocol.ID))
+
+		logger.Info(fmt.Sprintf("Processing speeches for protocol %d", protocol.ID))
+		db.Exec("UPDATE protocols SET processing_status = 'in_progress', processing_timestamp = now() WHERE id = $1", protocol.ID)
+		tx, err := db.Beginx()
+		if err != nil {
+			err = fmt.Errorf("failed to begin transaction: %w", err)
+			handleError(protocol.ID, err, logger)
+			continue
+		}
+		defer tx.Rollback()
+
+		err = processSpeeches(&protocol, tx, logger)
+		if err != nil {
+			err = fmt.Errorf("failed to process speeches: %w", err)
+			handleError(protocol.ID, err, logger)
+			continue
+		}
 
 		var count int
 		err = db.Get(&count, "SELECT COUNT(*) FROM activities a WHERE a.protocol_id = $1 AND a.type = 'Rede' AND (a.text IS NULL OR a.text = '')", protocol.ID)
 		if err != nil {
-			logger.Error(fmt.Sprintf("failed to check remaining speeches for protocol %d: %v", protocol.ID, err))
-			return fmt.Errorf("failed to check remaining speeches for protocol %d: %w", protocol.ID, err)
+			err = fmt.Errorf("failed to check remaining speeches: %w", err)
+			handleError(protocol.ID, err, logger)
+			continue
 		}
 		if count > 0 {
 			logger.Warn(fmt.Sprintf("There are still %d speeches without text for protocol %d", count, protocol.ID))
 		} else {
 			logger.Info(fmt.Sprintf("All speeches have been assigned for protocol %d", protocol.ID))
 		}
+
+		err = tx.Commit() //TODO: Commit only if missing activity-rate is at most 20 or 25%, else fail
+		if err != nil {
+			err = fmt.Errorf("failed to commit transaction: %w", err)
+			handleError(protocol.ID, err, logger)
+			continue
+		}
+		logger.Info(fmt.Sprintf("Successfully processed speeches for protocol %d", protocol.ID))
+		db.Exec("UPDATE protocols SET processing_status = 'completed' WHERE id = $1", protocol.ID)
+		if err != nil {
+			logger.Error(fmt.Sprintf("failed to set processed protocol %d to completed: %v", protocol.ID, err))
+			continue
+		}
 	}
-	return nil
+	return len(protocols) == 0, nil
 }

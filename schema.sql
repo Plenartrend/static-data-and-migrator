@@ -110,6 +110,8 @@ CREATE TABLE printed_papers (
     created TIMESTAMP
 );
 
+CREATE TYPE processing_status AS ENUM ('not_started', 'in_progress', 'completed', 'failed');
+
 -- Protocols (Plenarprotokolle)
 CREATE TABLE protocols (
     id INTEGER PRIMARY KEY,
@@ -123,7 +125,10 @@ CREATE TABLE protocols (
     date TIMESTAMP,
     api_updated TIMESTAMP,
     updated TIMESTAMP,
-    created TIMESTAMP
+    created TIMESTAMP,
+    processing_status processing_status DEFAULT 'not_started' NOT NULL,
+    failed_count INTEGER DEFAULT 0 NOT NULL,
+    processing_timestamp TIMESTAMP
 );
 
 -- Activities
