@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -25,6 +27,27 @@ func getGeminiClient() (*genai.Client, error) {
 }
 
 const geminiModel string = "gemini-2.5-flash"
+
+// createFlexibleWhitespacePattern converts a search string into a regex pattern
+// where each space can match various combinations of spaces and newlines
+func createFlexibleWhitespacePattern(searchString string) *regexp.Regexp {
+	// Escape special regex characters in the search string
+	escaped := regexp.QuoteMeta(searchString)
+	// Replace spaces with flexible whitespace pattern that matches one or more space/newline characters
+	// This matches: " ", "\n", " \n", "\n ", " \n ", etc.
+	pattern := strings.ReplaceAll(escaped, ` `, `[ \n]+`)
+	return regexp.MustCompile(pattern)
+}
+
+func findExactMatches(pattern *regexp.Regexp, haystack string, logger *Logger) []int {
+	logger.Debug(fmt.Sprintf("findExactMatches called: pattern: %s", pattern.String()))
+	var positions []int
+	matches := pattern.FindAllStringIndex(haystack, -1)
+	for _, match := range matches {
+		positions = append(positions, match[0])
+	}
+	return positions
+}
 
 func findBestMatch(needle string, haystack string, maxDistanceRatio float64, logger *Logger) (startIdx int, found bool) {
 	startTime := time.Now()
@@ -51,18 +74,10 @@ func findBestMatch(needle string, haystack string, maxDistanceRatio float64, log
 	// Phase 1: Remove words from the end
 	for numWords := len(words); numWords >= 3; numWords-- {
 		searchString := strings.Join(words[:numWords], " ")
+		pattern := createFlexibleWhitespacePattern(searchString)
 
-		// Find all occurrences of this search string
-		matchPositions = nil // Reset for this iteration
-		pos := 0
-		for {
-			idx := strings.Index(haystack[pos:], searchString)
-			if idx == -1 {
-				break
-			}
-			matchPositions = append(matchPositions, pos+idx)
-			pos += idx + 1 // Move forward by 1 to find overlapping matches
-		}
+		// Find all occurrences of this search string with flexible whitespace
+		matchPositions = findExactMatches(pattern, haystack, logger)
 
 		if len(matchPositions) > 0 {
 			// Found matches! Stop removing words and use these
@@ -79,18 +94,10 @@ func findBestMatch(needle string, haystack string, maxDistanceRatio float64, log
 		for numWordsToRemove := 1; numWordsToRemove <= len(words)-3; numWordsToRemove++ {
 			searchString := strings.Join(words[numWordsToRemove:], " ")
 			removedPrefix := strings.Join(words[:numWordsToRemove], " ") + " "
+			pattern := createFlexibleWhitespacePattern(searchString)
 
-			// Find all occurrences of this search string
-			matchPositions = nil // Reset for this iteration
-			pos := 0
-			for {
-				idx := strings.Index(haystack[pos:], searchString)
-				if idx == -1 {
-					break
-				}
-				matchPositions = append(matchPositions, pos+idx)
-				pos += idx + 1 // Move forward by 1 to find overlapping matches
-			}
+			// Find all occurrences of this search string with flexible whitespace
+			matchPositions = findExactMatches(pattern, haystack, logger)
 
 			if len(matchPositions) > 0 {
 				// Found matches! Remember how many words we removed from front
@@ -111,6 +118,7 @@ func findBestMatch(needle string, haystack string, maxDistanceRatio float64, log
 		middleStart := (len(words) - 3) / 2
 		middleEnd := middleStart + 3
 		searchString := strings.Join(words[middleStart:middleEnd], " ")
+		pattern := createFlexibleWhitespacePattern(searchString)
 
 		// Calculate removed prefix (words before middle)
 		var removedPrefix string
@@ -118,17 +126,8 @@ func findBestMatch(needle string, haystack string, maxDistanceRatio float64, log
 			removedPrefix = strings.Join(words[:middleStart], " ") + " "
 		}
 
-		// Find all occurrences of this search string
-		matchPositions = nil
-		pos := 0
-		for {
-			idx := strings.Index(haystack[pos:], searchString)
-			if idx == -1 {
-				break
-			}
-			matchPositions = append(matchPositions, pos+idx)
-			pos += idx + 1
-		}
+		// Find all occurrences of this search string with flexible whitespace
+		matchPositions = findExactMatches(pattern, haystack, logger)
 
 		if len(matchPositions) > 0 {
 			// Found matches with middle words
@@ -141,16 +140,12 @@ func findBestMatch(needle string, haystack string, maxDistanceRatio float64, log
 
 	if len(matchPositions) == 0 {
 		duration := time.Since(startTime)
-		needlePreview := needle
-		if len(needlePreview) > 200 {
-			needlePreview = needlePreview[:200] + "..."
-		}
-		logger.Warn(fmt.Sprintf("findBestMatch: no matches found even after trying end, front, and middle in %v. Needle:\n%s", duration, needlePreview))
+		logger.Warn(fmt.Sprintf("findBestMatch: no matches found even after trying end, front, and middle in %v. Needle:\n%s", duration, needle))
 		return -1, false
 	}
 
 	// For each match, calculate Levenshtein distance with original needle and pick the best
-	bestDistance := maxDistance + 1
+	bestDistance := math.MaxInt
 	bestIdx := -1
 
 	for _, matchPos := range matchPositions {
@@ -170,6 +165,7 @@ func findBestMatch(needle string, haystack string, maxDistanceRatio float64, log
 		}
 
 		window := haystack[adjustedPos : adjustedPos+needleLen]
+		logger.Debug(fmt.Sprintf("findBestMatch: needle: %s\nwindow: %s", needle, window))
 		distance := levenshtein.ComputeDistance(needle, window)
 
 		if distance < bestDistance {
@@ -201,11 +197,7 @@ func findBestMatch(needle string, haystack string, maxDistanceRatio float64, log
 	}
 
 	duration := time.Since(startTime)
-	needlePreview := needle
-	if len(needlePreview) > 200 {
-		needlePreview = needlePreview[:200] + "..."
-	}
-	logger.Warn(fmt.Sprintf("findBestMatch: no acceptable match found (bestDistance=%d > maxDistance=%d) in %v. Needle:\n%s", bestDistance, maxDistance, duration, needlePreview))
+	logger.Warn(fmt.Sprintf("findBestMatch: no acceptable match found (bestDistance=%d > maxDistance=%d) in %v. Needle:\n%s\n", bestDistance, maxDistance, duration, needle))
 	return -1, false
 }
 
@@ -226,10 +218,6 @@ func getSpeechByStartAndEnd(firstSentences string, lastSentences string, protoco
 		startIdx, found = findBestMatch(firstSentences, text, 0.25, logger)
 		if !found {
 			// Log detailed information for debugging - this is expected to happen sometimes
-			protocolPreview := text
-			if len(protocolPreview) > 1000 {
-				protocolPreview = protocolPreview[:1000] + "..."
-			}
 			logger.Warn(fmt.Sprintf("No match found for start (skipping speech). Start text:\n%s\nEnd text:\n%s", firstSentences, lastSentences))
 			return "", fmt.Errorf("could not find start of speech - skipping")
 		}
@@ -251,7 +239,7 @@ func getSpeechByStartAndEnd(firstSentences string, lastSentences string, protoco
 			if len(protocolPreview) > 1000 {
 				protocolPreview = protocolPreview[:1000] + "..."
 			}
-			logger.Warn(fmt.Sprintf("No match found for end (skipping speech). Start text:\n%s\nEnd text:\n%s\nProtocol (remaining text, first 1000 chars):\n%s", firstSentences, lastSentences, protocolPreview))
+			logger.Warn(fmt.Sprintf("No match found for end (skipping speech). Start text:\n%s\nEnd text:\n%s", firstSentences, lastSentences))
 			return "", fmt.Errorf("could not find end of speech - skipping")
 		}
 		logger.Info(fmt.Sprintf("Found fuzzy match for end at relative index %d", endIdx))

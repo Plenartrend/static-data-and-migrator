@@ -146,6 +146,24 @@ func main() {
 		fmt.Fprint(w, "Speeches assignment status updated with start="+strconv.FormatBool(start))
 	})
 
+	http.HandleFunc("/process-single-protocol", func(w http.ResponseWriter, r *http.Request) {
+		protocolId := r.URL.Query().Get("protocolId")
+		protocolIdInt, err := strconv.Atoi(protocolId)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, "Failed to parse protocolId", err)
+			return
+		}
+		err = processSingleProtocol(protocolIdInt)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, "Failed to process single protocol", err)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "Single protocol processed successfully")
+	})
+
 	log.Println("Server starting on :8080")
 	http.ListenAndServe(":8080", nil)
 }
