@@ -39,15 +39,20 @@ func main() {
 	}
 	defer db.Close()
 
+	_, err = getGeminiClient()
+	if err != nil {
+		log.Fatalf("Failed to get Gemini client: %v", err)
+	}
+
 	activitiesTextsChan = make(chan ActivitiesTexts)
 
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 16; i++ {
 		go func(workerId int) {
 			count := 0
 			workerPrefix := fmt.Sprintf("Worker %d", workerId)
 			fmt.Fprintf(os.Stdout, "Worker %d started\n", workerId)
 			logger := NewLogger(db, nil, nil, workerPrefix)
-			for count < 3 {
+			for count < 1 {
 				if !assignSpeechesToActivitiesWorkerRunning {
 					time.Sleep(1 * time.Second)
 					continue

@@ -46,6 +46,8 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 	logger.Debug("Ingesting persons")
 	var count = 0
 	var cursor *string
+	var processingErr error
+	var errMutex sync.Mutex
 
 	for {
 		resp, err := client.GetPersonListWithResponse(context.Background(), &dip.GetPersonListParams{
@@ -60,6 +62,14 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 			return fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
+		// Check if processing has already failed before queuing more tasks
+		errMutex.Lock()
+		if processingErr != nil {
+			errMutex.Unlock()
+			return fmt.Errorf("processing failed: %w", processingErr)
+		}
+		errMutex.Unlock()
+
 		// Capture documents in closure for parallel ingestion
 		documents := resp.JSON200.Documents
 
@@ -72,6 +82,11 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 			err := processPersons(db, documents, logger)
 			if err != nil {
 				logger.Error(fmt.Sprintf("failed to process persons: %v", err))
+				errMutex.Lock()
+				if processingErr == nil {
+					processingErr = err
+				}
+				errMutex.Unlock()
 			}
 		}
 
@@ -80,6 +95,14 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 		logger.Debug(fmt.Sprintf("Got %d persons with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
 		time.Sleep(requestTimeout)
 	}
+
+	errMutex.Lock()
+	if processingErr != nil {
+		errMutex.Unlock()
+		return fmt.Errorf("processing failed: %w", processingErr)
+	}
+	errMutex.Unlock()
+
 	return nil
 }
 
@@ -123,7 +146,7 @@ func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error 
 				return fmt.Errorf("get election period for person %s: %w", p.Id, err)
 			}
 
-			if err := setRole(db, p.Id, p.Funktion[0], p.Nachname, p.Vorname, electionPeriod, groupId, logger); err != nil {
+			if err := setRole(db, p.Id, p.Funktion[0], p.Nachname, p.Vorname, &p.Titel, p.Namenszusatz, electionPeriod, groupId, logger); err != nil {
 				return fmt.Errorf("insert role for person %s: %w", p.Id, err)
 			}
 		}
@@ -152,7 +175,7 @@ func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error 
 					if err != nil {
 						return fmt.Errorf("get election period for role: %w", err)
 					}
-					if err := setRole(db, p.Id, r.Funktion, r.Nachname, r.Vorname, electionPeriod, groupId, logger); err != nil {
+					if err := setRole(db, p.Id, r.Funktion, r.Nachname, r.Vorname, nil, r.Namenszusatz, electionPeriod, groupId, logger); err != nil {
 						return fmt.Errorf("insert role: %w", err)
 					}
 				}

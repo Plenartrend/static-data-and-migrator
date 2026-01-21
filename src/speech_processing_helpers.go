@@ -15,7 +15,7 @@ import (
 
 var geminiClient *genai.Client = nil // lazy initialized
 
-func getGeminiClient() (*genai.Client, error) {
+func getGeminiClient() (*genai.Client, error) { //TODO: Threadsafe
 	var err error = nil
 	if geminiClient == nil {
 		geminiClient, err = genai.NewClient(context.Background(), &genai.ClientConfig{

@@ -33,8 +33,8 @@ Return the speech in the completed section if it is complete, or in the "started
 Speeches always begin with the speaker being named (e.g., "Dr. Angela Merkel (CDU/CSU):" or "Manuela Schwesig (Mecklenburg-Vorpommern):").
 Note that questions or interjections also begin with a speaker name and should be included as part of the ongoing speech rather than separated.
 DO NOT INCLUDE organizational remarks by the president or vice president of the parliament, they are not speeches.
-'Erklärungen' also count as speeches if its done for or by a natural person. If the Erklärung is given for somebody else, affiliate it with that person. For example "Für Frau Ministerin Mona Neubaur gebe ich folgende
-Erklärung zu Protokoll" would be a speech for Mona Neubaur. "Für die Länder Hamburg und Bremen gebe ich folgende Erklärung zu Protokoll" is not done for or by a natural person, and therefore must be ignored.
+'Erklärungen' and 'zu Protokoll gegebene Reden' also count as speeches if its done for or by a natural person. If the Erklärung or Rede is given for somebody else, affiliate it with that person. For example "Für Frau Ministerin Mona Neubaur gebe ich folgende
+Erklärung zu Protokoll" would be a speech for Mona Neubaur. "Für die Länder Hamburg und Bremen gebe ich folgende Erklärung zu Protokoll" is not done for or by a natural person, and therefore must be ignored. Only the speech or erklärung itself count, not the announcment that there generally is one.
 
 You must return the first 15-30 words and the last 15-30 words of each speech in the original formatting, so I can programatically reconstruct the full speech.
 This uses less tokens than you returning the full speech. Therefore you must be CAREFUL TO MATCH EXACTLY THE ORIGINAL FORMATTING INCLUDING ANY ARTIFACTS LIKE NBSP AND ESPECIALLY NEWLINES.
@@ -50,8 +50,6 @@ CRITICAL RULES - EXACT SUBSTRING EXTRACTION:
 - EVERY character must match the original PERFECTLY
 - The rule is: AS FEW WORDS AS POSSIBLE, BUT AS MANY AS NECESSARY TO IDENTIFY THE SPEECH; NEVER MORE THAN 30 WORDS.
 `
-
-const chunkSize = 50_000
 
 func getResponseSchema() *genai.Schema {
 	return &genai.Schema{
@@ -105,36 +103,82 @@ func getResponseSchema() *genai.Schema {
 	}
 }
 
+func resetActivities(protocolId int, db DBInterface, logger *Logger) error {
+	_, err := db.Exec("UPDATE activities SET text = '' WHERE protocol_id = $1", protocolId)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to reset activities for protocol %d: %v", protocolId, err))
+		return fmt.Errorf("failed to reset activities for protocol %d: %w", protocolId, err)
+	}
+	logger.Info(fmt.Sprintf("Successfully reset activities for protocol %d", protocolId))
+	return nil
+}
+
 func addTextToActivity(protocolId int, speaker string, speech string, db DBInterface, logger *Logger) error {
+	logger.Debug(fmt.Sprintf(
+		"[addTextToActivity] Called with protocolId=%d, speaker='%s', speech length=%d and speech text:\n%s",
+		protocolId, speaker, len(speech), speech,
+	))
 	var activityId int
+
 	err := db.Get(&activityId, `
 			SELECT a.id
 			FROM activities a, roles r
 			WHERE a.role_id = r.id
 				AND a.protocol_id = $1
 				AND (a.type = 'Rede' OR a.type = 'Rede (zu Protokoll gegeben)')
-				AND CONCAT(r.first_name, ' ', r.last_name) = $2
+				AND (
+					(r.name_suffix IS NOT NULL AND r.name_suffix != '' AND CONCAT(r.first_name, ' ', r.name_suffix, ' ', r.last_name) = $2)
+					OR ((r.name_suffix IS NULL OR r.name_suffix = '') AND CONCAT(r.first_name, ' ', r.last_name) = $2)
+				)
+				AND (a.text IS NULL OR a.text = '')
 			ORDER BY a.id asc
 			LIMIT 1
 		`, protocolId, speaker)
+
 	if err == sql.ErrNoRows {
-		logger.Warn(fmt.Sprintf("could not correlate speech by speaker %s in protocol %d to an activity", speaker, protocolId))
+		logger.Warn(fmt.Sprintf("could not correlate speech by speaker '%s' in protocol %d to an activity", speaker, protocolId))
 		return nil
 	} else if err != nil {
+		logger.Error(fmt.Sprintf(
+			"[addTextToActivity] DB error during SELECT for activityId (protocolId=%d, speaker='%s'): %v",
+			protocolId, speaker, err,
+		))
 		return fmt.Errorf("failed to find activity for speaker %s in protocol %d: %w", speaker, protocolId, err)
 	}
 
-	//TODO: Log in here, it seems some valid speeches are not correlated with the activity for an unknown reason without failing. Maybe we add an empty string? E.g. because escaping empties the speech?
+	logger.Debug(fmt.Sprintf("[addTextToActivity] Found activityId=%d for speaker='%s' in protocolId=%d", activityId, speaker, protocolId))
 
-	_, err = db.Exec("UPDATE activities SET text = $2 WHERE id = $1", activityId, strings.ToValidUTF8(speech, ""))
+	cleanedSpeech := strings.ToValidUTF8(speech, "")
+	if cleanedSpeech != speech {
+		logger.Debug(fmt.Sprintf("[addTextToActivity] Speech text changed by ToValidUTF8 sanitization:\n%s\n", cleanedSpeech))
+	}
+	logger.Debug(fmt.Sprintf("[addTextToActivity] Updating activityId=%d with sanitized speech text (length=%d)",
+		activityId, len(cleanedSpeech),
+	))
+
+	_, err = db.Exec("UPDATE activities SET text = $2 WHERE id = $1", activityId, cleanedSpeech)
 	if err != nil {
+		logger.Error(fmt.Sprintf(
+			"[addTextToActivity] UPDATE failed for activityId=%d, speaker='%s': %v", activityId, speaker, err,
+		))
 		return fmt.Errorf("failed to update activity %d with speech for speaker %s: %w", activityId, speaker, err)
 	}
+
+	logger.Debug(fmt.Sprintf("[addTextToActivity] Successfully updated activityId=%d with speech for speaker='%s' in protocolId=%d", activityId, speaker, protocolId))
 	return nil
 }
 
-func processSpeeches(protocol *Protocol, db DBInterface, logger *Logger) error {
+func processSpeeches(protocol *Protocol, chunkSize *int, db DBInterface, logger *Logger) error {
 
+	err := resetActivities(protocol.ID, db, logger)
+	if err != nil {
+		return fmt.Errorf("failed to reset activities for protocol %d: %w", protocol.ID, err)
+	}
+
+	if chunkSize == nil {
+		defaultChunkSize := 50_000
+		chunkSize = &defaultChunkSize
+	}
 	var unmatchedSpeechesCount int = 0
 	protocolText := protocol.Text
 	protocolId := protocol.ID
@@ -160,9 +204,9 @@ func processSpeeches(protocol *Protocol, db DBInterface, logger *Logger) error {
 	startTime := time.Now()
 	updatedActivities := 0
 
-	for i := 0; i < len(protocolText); i += chunkSize {
+	for i := 0; i < len(protocolText); i += *chunkSize {
 
-		end := min(i+chunkSize, len(protocolText))
+		end := min(i+*chunkSize, len(protocolText))
 		chunk := protocolText[i:end]
 
 		logger.Debug(fmt.Sprintf("Processing chunk from index %d to %d", i, end))
@@ -253,24 +297,29 @@ func processSpeeches(protocol *Protocol, db DBInterface, logger *Logger) error {
 			}
 		}
 
-		startedSpeechMap := resultMap["started_speech"].(map[string]any)
-		startedSpeechPresent := startedSpeechMap["present"].(bool)
-
-		if startedSpeechPresent {
-			speaker := startedSpeechMap["speaker"].(string)
-			beginOfSpeechStart := startedSpeechMap["begin_of_speech_start"].(string)
-			beginningTooShort := startedSpeechMap["beginning_too_short"].(bool)
-
-			previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{
-				Present:           true,
-				Speaker:           speaker,
-				SpeechStart:       beginOfSpeechStart,
-				BeginningTooShort: beginningTooShort,
-			}
-
-			logger.Info(fmt.Sprintf("Started/continuing unfinished speech for Speaker %s", speaker))
-		} else {
+		startedSpeechMap, ok := resultMap["started_speech"].(map[string]any)
+		if !ok || startedSpeechMap == nil {
+			logger.Warn("started_speech is missing or null in model response; handling as if not present")
 			previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
+		} else {
+			startedSpeechPresent := startedSpeechMap["present"].(bool)
+
+			if startedSpeechPresent {
+				speaker := startedSpeechMap["speaker"].(string)
+				beginOfSpeechStart := startedSpeechMap["begin_of_speech_start"].(string)
+				beginningTooShort := startedSpeechMap["beginning_too_short"].(bool)
+
+				previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{
+					Present:           true,
+					Speaker:           speaker,
+					SpeechStart:       beginOfSpeechStart,
+					BeginningTooShort: beginningTooShort,
+				}
+
+				logger.Info(fmt.Sprintf("Started/continuing unfinished speech for Speaker %s", speaker))
+			} else {
+				previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
+			}
 		}
 
 		logger.Info(fmt.Sprintf("Finished processing chunk from index %d to %d. Updated %d activities", i, end, updatedActivities))
@@ -298,11 +347,23 @@ func processSingleProtocol(protocolId int) error {
 		return err
 	}
 
-	err = processSpeeches(&protocol, db, logger)
+	tx, err := db.Beginx()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	err = processSpeeches(&protocol, nil, tx, logger)
 	if err != nil {
 		logger.Error(fmt.Sprintf("failed to process speeches: %v", err))
 		return fmt.Errorf("failed to process speeches: %w", err)
 	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
 	logger.Info(fmt.Sprintf("Successfully processed speeches for protocol %d", protocolId))
 	return nil
 }
@@ -335,10 +396,10 @@ func processNextProtocol(logger *Logger) (bool, error) {
 			OR (
 				p.processing_status = 'failed'
 					AND (
-					p.failed_count = 1
+					p.attempts_count = 1
 						OR (
-						p.failed_count = 2
-							AND (now() - p.processing_timestamp > interval '1 hour')
+						p.attempts_count = 2
+							AND (now() - p.processing_timestamp > interval '1 day')
 						)
 					)
 				)
@@ -346,21 +407,21 @@ func processNextProtocol(logger *Logger) (bool, error) {
 				p.processing_status = 'in_progress'
 					AND (now() - p.processing_timestamp > interval '1 hour')
 				)
-			AND p.text IS NOT NULL AND p.text != '' AND p.text != '[NoTextAvailable]' AND len(p.text) > 1000
+			AND p.text IS NOT NULL AND p.text != '' AND p.text != '[NoTextAvailable]' AND length(p.text) > 1000
 			ORDER BY p.date DESC
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
 		UPDATE protocols p
 		SET processing_status = 'in_progress', 
-			processing_timestamp = now()
+			processing_timestamp = now(),
+			attempts_count = attempts_count + 1
 		FROM to_update t
 		WHERE p.id = t.id
 		RETURNING p.*;
 		`
 	handleError := func(protocolID int, err error, logger *Logger) {
 		logger.Error(fmt.Sprintf("failed to process speeches for protocol %d: %v", protocolID, err))
-		_, err = db.Exec("UPDATE protocols SET processing_status = 'failed', failed_count = failed_count + 1 WHERE id = $1", protocolID)
 		if err != nil {
 			logger.Error(fmt.Sprintf("failed to update protocol %d: %v", protocolID, err))
 		}
@@ -377,7 +438,6 @@ func processNextProtocol(logger *Logger) (bool, error) {
 		logger.AppendPrefix(fmt.Sprintf("protocol %d", protocol.ID))
 
 		logger.Info(fmt.Sprintf("Processing speeches for protocol %d", protocol.ID))
-		db.Exec("UPDATE protocols SET processing_status = 'in_progress', processing_timestamp = now() WHERE id = $1", protocol.ID)
 		tx, err := db.Beginx()
 		if err != nil {
 			err = fmt.Errorf("failed to begin transaction: %w", err)
@@ -386,7 +446,14 @@ func processNextProtocol(logger *Logger) (bool, error) {
 		}
 		defer tx.Rollback()
 
-		err = processSpeeches(&protocol, tx, logger)
+		chunkSize := 50_000
+		if protocol.AttemptsCount == 1 {
+			chunkSize = 75_000 //Attempt larger chunksSize
+		} else if protocol.AttemptsCount == 2 {
+			chunkSize = 25_000 //Attempt smaller chunksSize
+		}
+
+		err = processSpeeches(&protocol, &chunkSize, tx, logger)
 		if err != nil {
 			err = fmt.Errorf("failed to process speeches: %w", err)
 			handleError(protocol.ID, err, logger)

@@ -19,14 +19,14 @@ func getLastSuccessTimestamp(db DBInterface, logger *Logger) (time.Time, error) 
 }
 
 // setRole sets a role in the database and logs a warning if it already exists. This happens because of low quality data in the API.
-func setRole(db DBInterface, personID string, name string, lastName string, firstName string, electionPeriod int, groupID *int, logger *Logger) error {
-	var exists bool
+func setRole(db DBInterface, personID string, name string, lastName string, firstName string, title *string, nameSuffix *string, electionPeriod int, groupID *int, logger *Logger) error {
+	var exists bool //We do not check on title because its only a person and not role attribute in the API
 	err := db.Get(&exists, `
 		SELECT EXISTS(
 			SELECT 1 FROM roles 
-			WHERE person_id = $1 AND election_period = $2 AND name = $3
+			WHERE person_id = $1 AND election_period = $2 AND name = $3 AND name_suffix = $4
 		)
-	`, personID, electionPeriod, name)
+	`, personID, electionPeriod, name, nameSuffix)
 	if err != nil {
 		return fmt.Errorf("check role existence: %w", err)
 	}
@@ -36,8 +36,8 @@ func setRole(db DBInterface, personID string, name string, lastName string, firs
 		return nil
 	}
 
-	_, err = db.Exec("INSERT INTO roles (person_id, name, last_name, first_name, election_period, group_id) VALUES ($1, $2, $3, $4, $5, $6)",
-		personID, name, lastName, firstName, electionPeriod, groupID)
+	_, err = db.Exec("INSERT INTO roles (person_id, name, last_name, first_name, title, name_suffix, election_period, group_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+		personID, name, lastName, firstName, title, nameSuffix, electionPeriod, groupID)
 	if err != nil {
 		return fmt.Errorf("insert role: %w", err)
 	}

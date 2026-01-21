@@ -97,21 +97,21 @@ type PrintedPaper struct {
 }
 
 type Protocol struct {
-	ID                 int             `db:"id" json:"id,omitempty"`
-	Title              string          `db:"title" json:"title,omitempty"`
-	DocumentNumber     string          `db:"document_number" json:"document_number,omitempty"`
-	Publisher          Body            `db:"publisher" json:"publisher,omitempty"`
-	SessionNote        sql.NullString  `db:"session_note" json:"session_note,omitempty"`
-	URL                string          `db:"url" json:"url,omitempty"`
-	Text               string          `db:"text" json:"text,omitempty"`
-	ElectionPeriod     int             `db:"election_period" json:"election_period,omitempty"`
-	Date               time.Time       `db:"date" json:"date,omitempty"`
-	APIUpdated         time.Time       `db:"api_updated" json:"api_updated,omitempty"`
-	Updated            time.Time       `db:"updated" json:"updated,omitempty"`
-	Created            time.Time       `db:"created" json:"created,omitempty"`
-	ProcessingStatus   ProcessingStatus `db:"processing_status" json:"processing_status,omitempty"`
-	FailedCount        int             `db:"failed_count" json:"failed_count,omitempty"`
-	ProcessingTimestamp sql.NullTime    `db:"processing_timestamp" json:"processing_timestamp,omitempty"`
+	ID                  int              `db:"id" json:"id,omitempty"`
+	Title               string           `db:"title" json:"title,omitempty"`
+	DocumentNumber      string           `db:"document_number" json:"document_number,omitempty"`
+	Publisher           Body             `db:"publisher" json:"publisher,omitempty"`
+	SessionNote         sql.NullString   `db:"session_note" json:"session_note,omitempty"`
+	URL                 string           `db:"url" json:"url,omitempty"`
+	Text                string           `db:"text" json:"text,omitempty"`
+	ElectionPeriod      int              `db:"election_period" json:"election_period,omitempty"`
+	Date                time.Time        `db:"date" json:"date,omitempty"`
+	APIUpdated          time.Time        `db:"api_updated" json:"api_updated,omitempty"`
+	Updated             time.Time        `db:"updated" json:"updated,omitempty"`
+	Created             time.Time        `db:"created" json:"created,omitempty"`
+	ProcessingStatus    ProcessingStatus `db:"processing_status" json:"processing_status,omitempty"`
+	AttemptsCount       int              `db:"attempts_count" json:"attempts_count,omitempty"`
+	ProcessingTimestamp sql.NullTime     `db:"processing_timestamp" json:"processing_timestamp,omitempty"`
 }
 
 type Activity struct {
@@ -145,7 +145,8 @@ type ParliamentaryGroup struct {
 type Role struct {
 	ID             int            `db:"id" json:"id,omitempty"`
 	RoleName       sql.NullString `db:"name" json:"name,omitempty"`
-	AcademicTitle  sql.NullString `db:"academic_title" json:"academic_title,omitempty"`
+	Title          sql.NullString `db:"title" json:"title,omitempty"`
+	NameSuffix     sql.NullString `db:"name_suffix" json:"name_suffix,omitempty"`
 	LastName       string         `db:"last_name" json:"last_name,omitempty"`
 	FirstName      string         `db:"first_name" json:"first_name,omitempty"`
 	PersonID       int            `db:"person_id" json:"person_id,omitempty"`
