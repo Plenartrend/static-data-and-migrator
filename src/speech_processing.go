@@ -1,16 +1,13 @@
 package main
 
 import (
-	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
-	"google.golang.org/genai"
 )
 
 type PreviouslyUnfinishedSpeech struct {
@@ -18,89 +15,6 @@ type PreviouslyUnfinishedSpeech struct {
 	Speaker           string
 	SpeechStart       string
 	BeginningTooShort bool
-}
-
-const systemInstruction = `
-You will receive a chunk of a German parliamentary protocol along with the end of the previous chunk. Your task is to extract speeches.
-A speech is the full statement of one person, including any interruptions (e.g., questions or interjections by others), WHICH ALWAYS SHOULD BE INCLUDED AS PART OF THE SPEECH.
-
-1. Identify speeches that start and end within this chunk (not the previous chunk). For each, return the speaker's full name, the first 15-30 words, and the last 15-30 words of the speech. If the beginning is very generic use closer to 30 words, else closer to 15.
-2. If a speech starts in this chunk but does not end, return the speaker's full name and the first 15-30 words if possible.
-3. If a speech started in a previous chunk and continues here, you already received the beginning of the speech. If the beginning is flagged as too short or generic, expand it with the beginning of this chunk until it is 15-30 words long in total. Make sure to not add any spaces or similar, the result should be verbatim from the original text.
-Return the speech in the completed section if it is complete, or in the "started" section if it is still not complete.
-
-"Speaker's full name" refers to the format "FirstName LastName" with no titles, honorifics, or party affiliations.
-Speeches always begin with the speaker being named (e.g., "Dr. Angela Merkel (CDU/CSU):" or "Manuela Schwesig (Mecklenburg-Vorpommern):").
-Note that questions or interjections also begin with a speaker name and should be included as part of the ongoing speech rather than separated.
-DO NOT INCLUDE organizational remarks by the president or vice president of the parliament, they are not speeches.
-'Erklärungen' and 'zu Protokoll gegebene Reden' also count as speeches if its done for or by a natural person. If the Erklärung or Rede is given for somebody else, affiliate it with that person. For example "Für Frau Ministerin Mona Neubaur gebe ich folgende
-Erklärung zu Protokoll" would be a speech for Mona Neubaur. "Für die Länder Hamburg und Bremen gebe ich folgende Erklärung zu Protokoll" is not done for or by a natural person, and therefore must be ignored. Only the speech or erklärung itself count, not the announcment that there generally is one.
-
-You must return the first 15-30 words and the last 15-30 words of each speech in the original formatting, so I can programatically reconstruct the full speech.
-This uses less tokens than you returning the full speech. Therefore you must be CAREFUL TO MATCH EXACTLY THE ORIGINAL FORMATTING INCLUDING ANY ARTIFACTS LIKE NBSP AND ESPECIALLY NEWLINES.
-
-CRITICAL RULES - EXACT SUBSTRING EXTRACTION:
-- Copy text EXACTLY character by character from the original
-- DO NOT use ".." or "..." (ellipses) to skip or summarize parts
-- NEVER START OR END A TEXT WITH ".." or "..." (ellipses), except if this is actually in the original text
-- DO NOT paraphrase, reformat, or reconstruct sentences
-- DO NOT add or remove any characters, spaces, or newlines
-- DO NOT CHANGE THE CASING OF ANY LETTER
-- NEVER SKIP SPEECHES, WE NEED ALL OF THEM.
-- EVERY character must match the original PERFECTLY
-- The rule is: AS FEW WORDS AS POSSIBLE, BUT AS MANY AS NECESSARY TO IDENTIFY THE SPEECH; NEVER MORE THAN 30 WORDS.
-`
-
-func getResponseSchema() *genai.Schema {
-	return &genai.Schema{
-		Type:        "object",
-		Description: "Container for iterative speech extraction and assignment to activities.",
-		Properties: map[string]*genai.Schema{
-			"complete_speeches": {
-				Type:        "array",
-				Description: "List of speeches that both start and end within this chunk.",
-				Items: &genai.Schema{
-					Type: "object",
-					Properties: map[string]*genai.Schema{
-						"speaker": {
-							Type:        "string",
-							Description: "The full name of the speaker that gave the speech. Do NOT INCLUDE titles like 'Dr.' or 'Prof.'",
-						},
-						"speech_text_start": {
-							Type:        "string",
-							Description: "EXACT substring: The first 15-30 words of the speech copied character-by-character from the original text. NO ellipsis (..), NO paraphrasing, NO changes. Must include exact formatting with NBSP, newlines, and all artifacts. Also include interruptions by others like interjections or clapping if they are in the original text.",
-						},
-						"speech_text_end": {
-							Type:        "string",
-							Description: "EXACT substring: The last 15-30 words of the speech copied character-by-character from the original text. NO ellipsis (..), NO paraphrasing, NO changes. Must include exact formatting with NBSP, newlines, and all artifacts. Also include interruptions by others like interjections or clapping if they are in the original text.",
-						},
-					},
-				},
-			},
-			"started_speech": {
-				Type:        "object",
-				Description: "Contains the beginning part of a speech that has started in this chunk but is not yet complete.",
-				Properties: map[string]*genai.Schema{
-					"present": {
-						Type:        "boolean",
-						Description: "Indicates if there is a speech that has started but is not yet complete.",
-					},
-					"speaker": {
-						Type:        "string",
-						Description: "The full name of the speaker that gave the started speech. Do NOT INCLUDE titles like 'Dr.' or 'Prof.'",
-					},
-					"begin_of_speech_start": {
-						Type:        "string",
-						Description: "EXACT substring: The first 15-30 words of the speech copied character-by-character from the original text. NO ellipsis (..), NO paraphrasing, NO changes. Must include exact formatting with NBSP, newlines, and all artifacts. Also include interruptions by others like interjections or clapping if they are in the original text.",
-					},
-					"beginning_too_short": {
-						Type:        "boolean",
-						Description: "Indicates if the beginning of the speech is too short or generic because the chunk ended soon after the beginning. Only set to true if the beginning is very likely too generic to identify the text. ONLY do this if you are really sure that the beginning is too short, as this can lead to errors.",
-					},
-				},
-			},
-		},
-	}
 }
 
 func resetActivities(protocolId int, db DBInterface, logger *Logger) error {
@@ -182,17 +96,6 @@ func processSpeeches(protocol *Protocol, chunkSize *int, db DBInterface, logger 
 	var unmatchedSpeechesCount int = 0
 	protocolText := protocol.Text
 	protocolId := protocol.ID
-	client, err := getGeminiClient()
-
-	if err != nil {
-		return fmt.Errorf("failed to get Gemini client: %w", err)
-	}
-
-	systemInstruction := &genai.Content{
-		Parts: []*genai.Part{
-			{Text: systemInstruction},
-		},
-	}
 
 	var previouslyUnfinishedSpeech PreviouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{
 		Present:           false,
@@ -228,98 +131,57 @@ func processSpeeches(protocol *Protocol, chunkSize *int, db DBInterface, logger 
 			contextText += "The end of the previous chunk is:\n" + endOfPreviousChunk + "\n\n"
 		}
 
-		content := []*genai.Content{
-			{
-				Parts: []*genai.Part{
-					{
-						Text: contextText,
-					},
-					{
-						Text: "The protocol chunk is:\n",
-					},
-					{
-						Text: chunk,
-					},
-				},
-			},
+		query := []string{
+			contextText,
+			"The protocol chunk is:\n" + chunk,
 		}
 
-		resp, err := client.Models.GenerateContent(context.Background(), geminiModel, content, &genai.GenerateContentConfig{
-			SystemInstruction:  systemInstruction,
-			ResponseMIMEType:   "application/json",
-			ResponseJsonSchema: getResponseSchema(),
-		})
+		response, err := model.GenerateContent(query, logger)
 
 		if err != nil {
 			return err
 		}
 
-		responseText := resp.Text()
-		logger.Debug(fmt.Sprintf("Gemini model response (length=%d): %s", len(responseText), responseText))
-
-		var resultMap map[string]any
-		if err := json.Unmarshal([]byte(resp.Text()), &resultMap); err != nil {
-			return fmt.Errorf("failed to parse response: %w", err)
-		}
-
-		logger.Debug(fmt.Sprintf("Parsed response: %+v", resultMap))
-
-		completeSpeechesArray, ok := resultMap["complete_speeches"].([]any)
-		if !ok {
-			logger.Warn("complete_speeches is not an array")
-		}
-		for _, speechEntry := range completeSpeechesArray {
-			speechMap := speechEntry.(map[string]any)
-			speaker := speechMap["speaker"].(string)
-			speechTextStart := speechMap["speech_text_start"].(string)
-			speechTextEnd := speechMap["speech_text_end"].(string)
+		for _, speech := range response.CompleteSpeeches {
+			// Skip if any required field is empty (validation already logged in unmarshal function)
+			if speech.Speaker == "" || speech.SpeechTextStart == "" || speech.SpeechTextEnd == "" {
+				continue
+			}
 
 			// Reconstruct the full speech using start and end
-			fullSpeech, err := getSpeechByStartAndEnd(speechTextStart, speechTextEnd, protocol, logger)
+			fullSpeech, err := getSpeechByStartAndEnd(speech.SpeechTextStart, speech.SpeechTextEnd, protocol, logger)
 			if err != nil {
-				logger.Warn(fmt.Sprintf("Skipping speech for speaker %s: %v", speaker, err))
+				logger.Warn(fmt.Sprintf("Skipping speech for speaker %s: %v", speech.Speaker, err))
 				unmatchedSpeechesCount++
-				if previouslyUnfinishedSpeech.Present && previouslyUnfinishedSpeech.Speaker == speaker {
+				if previouslyUnfinishedSpeech.Present && previouslyUnfinishedSpeech.Speaker == speech.Speaker {
 					previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
 				}
 				continue
 			}
 
-			logger.Info(fmt.Sprintf("Complete speech for Speaker %s (length=%d)", speaker, len(fullSpeech)))
-			err = addTextToActivity(protocolId, speaker, fullSpeech, db, logger)
+			logger.Info(fmt.Sprintf("Complete speech for Speaker %s (length=%d)", speech.Speaker, len(fullSpeech)))
+			err = addTextToActivity(protocolId, speech.Speaker, fullSpeech, db, logger)
 			if err != nil {
 				return fmt.Errorf("failed to add completed speech to activity: %w", err)
 			}
 			updatedActivities++
 
-			if previouslyUnfinishedSpeech.Present && previouslyUnfinishedSpeech.Speaker == speaker {
+			if previouslyUnfinishedSpeech.Present && previouslyUnfinishedSpeech.Speaker == speech.Speaker {
 				previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
 			}
 		}
 
-		startedSpeechMap, ok := resultMap["started_speech"].(map[string]any)
-		if !ok || startedSpeechMap == nil {
-			logger.Warn("started_speech is missing or null in model response; handling as if not present")
+		if response.StartedSpeech == nil {
 			previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
 		} else {
-			startedSpeechPresent := startedSpeechMap["present"].(bool)
-
-			if startedSpeechPresent {
-				speaker := startedSpeechMap["speaker"].(string)
-				beginOfSpeechStart := startedSpeechMap["begin_of_speech_start"].(string)
-				beginningTooShort := startedSpeechMap["beginning_too_short"].(bool)
-
-				previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{
-					Present:           true,
-					Speaker:           speaker,
-					SpeechStart:       beginOfSpeechStart,
-					BeginningTooShort: beginningTooShort,
-				}
-
-				logger.Info(fmt.Sprintf("Started/continuing unfinished speech for Speaker %s", speaker))
-			} else {
-				previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{Present: false}
+			previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{
+				Present:           true,
+				Speaker:           response.StartedSpeech.Speaker,
+				SpeechStart:       response.StartedSpeech.BeginOfSpeechStart,
+				BeginningTooShort: response.StartedSpeech.BeginningTooShort,
 			}
+
+			logger.Info(fmt.Sprintf("Started/continuing unfinished speech for Speaker %s", response.StartedSpeech.Speaker))
 		}
 
 		logger.Info(fmt.Sprintf("Finished processing chunk from index %d to %d. Updated %d activities", i, end, updatedActivities))
@@ -363,6 +225,8 @@ func processSingleProtocol(protocolId int) error {
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+
+	db.Exec("UPDATE protocols SET processing_status = 'completed' WHERE id = $1", protocolId)
 
 	logger.Info(fmt.Sprintf("Successfully processed speeches for protocol %d", protocolId))
 	return nil
@@ -448,9 +312,9 @@ func processNextProtocol(logger *Logger) (bool, error) {
 
 		chunkSize := 50_000
 		if protocol.AttemptsCount == 1 {
-			chunkSize = 75_000 //Attempt larger chunksSize
-		} else if protocol.AttemptsCount == 2 {
 			chunkSize = 25_000 //Attempt smaller chunksSize
+		} else if protocol.AttemptsCount == 2 {
+			chunkSize = 75_000 //Attempt larger chunksSize
 		}
 
 		err = processSpeeches(&protocol, &chunkSize, tx, logger)

@@ -26,6 +26,8 @@ var activitiesTextsChan chan ActivitiesTexts = nil
 
 var assignSpeechesToActivitiesWorkerRunning = false
 
+var model ModelInterface = &GeminiModel{}
+
 func main() {
 
 	err := godotenv.Load()
@@ -39,9 +41,9 @@ func main() {
 	}
 	defer db.Close()
 
-	_, err = getGeminiClient()
+	err = model.Initialize(NewLogger(db, nil, nil))
 	if err != nil {
-		log.Fatalf("Failed to get Gemini client: %v", err)
+		log.Fatalf("Failed to initialize model: %v", err)
 	}
 
 	activitiesTextsChan = make(chan ActivitiesTexts)

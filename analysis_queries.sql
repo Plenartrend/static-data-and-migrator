@@ -24,3 +24,15 @@ WHERE p.processing_status = 'completed'
 GROUP BY p.id
 HAVING COUNT(*) FILTER (WHERE a.text = '')::float / COUNT(*)::float > 0.25
 ORDER BY unassigned_rate DESC;
+
+-- Unassignment-Rate for a specific protocol --
+SELECT
+    p.id AS protocol_id,
+    COUNT(a.id) AS act_count,
+    COUNT(*) FILTER (WHERE a.text = '')::float
+        / COUNT(*)::float AS unassigned_rate
+FROM protocols p
+         JOIN activities a ON a.protocol_id = p.id
+WHERE p.id = 5750
+  AND a.type = 'Rede'
+GROUP BY p.id;
