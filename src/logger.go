@@ -68,7 +68,7 @@ func (l *Logger) Debug(message string) {
 		fmt.Println("DEBUG: ", formattedMessage)
 	}
 	if l.minDatabaseLevel <= Debug {
-		l.Log("debug", message)
+		l.Log("debug", formattedMessage)
 	}
 }
 
@@ -78,7 +78,7 @@ func (l *Logger) Info(message string) {
 		fmt.Println("INFO: ", formattedMessage)
 	}
 	if l.minDatabaseLevel <= Info {
-		l.Log("info", message)
+		l.Log("info", formattedMessage)
 	}
 }
 
@@ -88,7 +88,7 @@ func (l *Logger) Warn(message string) {
 		fmt.Println("WARN: ", formattedMessage)
 	}
 	if l.minDatabaseLevel <= Warn {
-		l.Log("warn", message)
+		l.Log("warn", formattedMessage)
 	}
 }
 
@@ -98,14 +98,14 @@ func (l *Logger) Error(message string) {
 		fmt.Println("ERROR: ", formattedMessage)
 	}
 	if l.minDatabaseLevel <= Error {
-		l.Log("error", message)
+		l.Log("error", formattedMessage)
 	}
 }
 
 func (l *Logger) Fatal(message string) {
 	formattedMessage := l.formatMessage(message)
 	if l.minDatabaseLevel <= Fatal {
-		l.Log("fatal", message)
+		l.Log("fatal", formattedMessage)
 	}
 	if l.minConsoleLevel <= Fatal {
 		fmt.Println("FATAL: ", formattedMessage)

@@ -19,7 +19,10 @@ var SPEECH_TEST_FILE = fmt.Sprintf("test_data/protocol_%d_speeches.txt", PROTOCO
 var MAX_ACCEPTABLE_LEVENSHTEIN_RATIO = 0.1
 
 func TestProcessSpeeches(t *testing.T) {
-	_ = godotenv.Load("../.env.test")
+	err := godotenv.Load("../.env.test")
+	if err != nil {
+		t.Fatalf("Failed to load .env.test: %v", err)
+	}
 
 	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {

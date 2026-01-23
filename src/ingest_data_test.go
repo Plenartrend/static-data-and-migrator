@@ -10,7 +10,10 @@ import (
 )
 
 func TestPersonRolesForBodoRamelow(t *testing.T) {
-	_ = godotenv.Load("../.env") // Load .env from project root
+	err := godotenv.Load("../.env.test") // Load .env from project root
+	if err != nil {
+		t.Fatalf("Failed to load .env.test: %v", err)
+	}
 	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {
 		t.Fatalf("Failed to connect to database: %v", err)
