@@ -9,7 +9,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/oapi-codegen/runtime v1.1.2
 	github.com/ollama/ollama v0.14.2
-	google.golang.org/genai v1.41.0
+	google.golang.org/genai v1.43.0
 )
 
 require (
