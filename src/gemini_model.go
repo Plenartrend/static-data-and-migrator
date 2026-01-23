@@ -29,7 +29,7 @@ func (gm *GeminiModel) Initialize(logger *Logger) error {
 		return fmt.Errorf("failed to initialize Gemini model: %w", err)
 	}
 	gm.client = client
-	logger.Info(fmt.Sprintf("Gemini model initialized"))
+	logger.Info("Gemini model initialized")
 	return nil
 }
 
