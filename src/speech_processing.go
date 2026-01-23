@@ -54,7 +54,7 @@ func addTextToActivity(protocolId int, speaker string, givenToProtocol bool, spe
 	} else if err != nil {
 		logger.Error(fmt.Sprintf(
 			"[addTextToActivity] DB error during SELECT for activityId (protocolId=%d, speaker='%s', speechType='%s'): %v",
-			protocolId, speaker, err,
+			protocolId, speaker, speechType, err,
 		))
 		return fmt.Errorf("failed to find activity for speaker %s in protocol %d: %w", speaker, protocolId, err)
 	}
@@ -66,7 +66,7 @@ func addTextToActivity(protocolId int, speaker string, givenToProtocol bool, spe
 		logger.Debug(fmt.Sprintf("[addTextToActivity] Speech text changed by ToValidUTF8 sanitization:\n%s\n", cleanedSpeech))
 	}
 	logger.Debug(fmt.Sprintf("[addTextToActivity] Updating activityId=%d with sanitized speech text (length=%d) and speechType='%s'",
-		activityId, len(cleanedSpeech),
+		activityId, len(cleanedSpeech), speechType,
 	))
 
 	_, err = db.Exec("UPDATE activities SET text = $2 WHERE id = $1", activityId, cleanedSpeech)
@@ -345,7 +345,7 @@ func processNextProtocol(logger *Logger) (bool, error) {
 			continue
 		}
 		logger.Info(fmt.Sprintf("Successfully processed speeches for protocol %d", protocol.ID))
-		db.Exec("UPDATE protocols SET processing_status = 'completed' WHERE id = $1", protocol.ID)
+		_, err = db.Exec("UPDATE protocols SET processing_status = 'completed' WHERE id = $1", protocol.ID)
 		if err != nil {
 			logger.Error(fmt.Sprintf("failed to set processed protocol %d to completed: %v", protocol.ID, err))
 			continue

@@ -51,10 +51,8 @@ Return the speech in the completed section if it is complete, or in the "started
 Speeches always begin with the speaker being named (e.g., "Dr. Angela Merkel (CDU/CSU):" or "Manuela Schwesig (Mecklenburg-Vorpommern):").
 Note that questions or interjections also begin with a speaker name and should be included as part of the ongoing speech rather than separated.
 DO NOT INCLUDE organizational remarks by the president or vice president of the parliament, they are not speeches.
-
-'Erklärungen' and 'zu Protokoll gegebene Reden' (speeches given to protocol and read by somebody else) also count as speeches. If the Erklärung or Rede is given for somebody else, affiliate it with that person. For example "Für Frau Ministerin Mona Neubaur gebe ich folgende
-Erklärung zu Protokoll" would be a speech for Mona Neubaur. ONLY INCLUDE THE SPEECH OR ERKLÄRUNG ITSELF, NO ANNOUNCEMENTS. ANNOUNCMENTS OF SPEECHES GIVEN TO PROTOCOL MUST BE IGNORED and not returned in any way, also not with flag given_to_protocol set to true. Better miss one than accidantly returning an announcment as speech.
-"Es gibt noch eine Erklärung zu Protokoll von Frau Ministerin Behrens (Niedersachsen)." is an announcment THAT MUST BE IGNORED. The speech will probably come much later in the text as Attachment. "Erklärung von Ministerin Bettina Martin (Mecklenburg-Vorpommern) zu Punkt 2 der Tagesordnung \n Für die Länder Mecklenburg-Vorpommern und Bremen gebe ich folgende Erklärung zu Protokoll" on the other starts a protocolled speech that must be included.
+'Erklärungen' and 'zu Protokoll gegebene Reden' also count as speeches if its done for or by a natural person. If the Erklärung or Rede is given for somebody else, affiliate it with that person. For example "Für Frau Ministerin Mona Neubaur gebe ich folgende
+Erklärung zu Protokoll" would be a speech for Mona Neubaur. "Für die Länder Hamburg und Bremen gebe ich folgende Erklärung zu Protokoll" is not done for or by a natural person, and therefore must be ignored. Only the speech or erklärung itself count, not the announcment that there generally is one.
 
 You must return the first 15-30 words and the last 15-30 words of each speech in the original formatting, so I can programatically reconstruct the full speech.
 This uses less tokens than you returning the full speech. Therefore you must be CAREFUL TO MATCH EXACTLY THE ORIGINAL FORMATTING INCLUDING ANY ARTIFACTS LIKE NBSP AND ESPECIALLY NEWLINES.
@@ -66,23 +64,9 @@ CRITICAL RULES - EXACT SUBSTRING EXTRACTION:
 - DO NOT paraphrase, reformat, or reconstruct sentences
 - DO NOT add or remove any characters, spaces, or newlines
 - DO NOT CHANGE THE CASING OF ANY LETTER
+- NEVER SKIP SPEECHES, WE NEED ALL OF THEM.
 - EVERY character must match the original PERFECTLY
 - The rule is: AS FEW WORDS AS POSSIBLE, BUT AS MANY AS NECESSARY TO IDENTIFY THE SPEECH; NEVER MORE THAN 30 WORDS.
-
-EXAMPLES:
-
-Input Chunk:
-Mir liegt eine Wortmeldung von Frau Ministerpräsidentin Schwesig, Mecklenburg-Vorpommern, vor.
-Manuela Schwesig (Mecklenburg-Vorpommern):
-Sehr geehrter Präsident! Liebe Kolleginnen und Kollegen! Zunächst möchte ich unserem neuen Bundesratspräsidenten ganz herzlich gratulieren. Lieber Kollege Andreas Bovenschulte, viel Erfolg! [many more words] Und wir wollen die Aufklärung stärken, zum Beispiel in der schulischen Medienbildung. Wer frühzeitig lernt, wie solche Mechanismen funktionieren, kann sich besser schützen. Zusammengefasst: Spielspaß ja, aber Glücksspiel nein, schon gar nicht für unsere Kinder. Vielen Dank.
-
-Output JSON (completed_speech):
-{
-  "speaker": "Friedrich Merz",
-  "speech_text_start": "Sehr geehrter Präsident! Liebe Kolleginnen und Kollegen! Zunächst möchte ich unserem neuen Bundesratspräsidenten ganz herzlich gratulieren.",
-  "speech_text_end": "Zusammengefasst: Spielspaß ja, aber Glücksspiel nein, schon gar nicht für unsere Kinder. Vielen Dank.",
-  "given_to_protocol": false
-}
 `
 
 // This is an exemplary response schema for gemini. If you want to change the response schema
