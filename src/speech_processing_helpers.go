@@ -25,7 +25,6 @@ func createFlexibleWhitespacePattern(searchString string) *regexp.Regexp {
 }
 
 func findExactMatches(pattern *regexp.Regexp, haystack string, logger *Logger) []int {
-	logger.Debug(fmt.Sprintf("findExactMatches called: pattern: %s", pattern.String()))
 	var positions []int
 	matches := pattern.FindAllStringIndex(haystack, -1)
 	for _, match := range matches {
@@ -140,7 +139,7 @@ func findBestMatch(needle string, haystack string, maxDistanceRatio float64, dir
 			}
 
 			window := haystack[adjustedPos : adjustedPos+needleLen]
-			logger.Debug(fmt.Sprintf("findBestMatch: needle: %s\nwindow: %s", needle, window))
+			//logger.Debug(fmt.Sprintf("findBestMatch: needle: %s\nwindow: %s", needle, window))
 			distance := levenshtein.ComputeDistance(needle, window)
 
 			if distance < bestDistance {

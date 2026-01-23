@@ -125,7 +125,7 @@ func main() {
 		fmt.Fprint(w, "Data ingested successfully")
 	})
 
-	http.HandleFunc("/test-gemini", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/test-model", func(w http.ResponseWriter, r *http.Request) {
 		testAiClient()
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "Test completed successfully")

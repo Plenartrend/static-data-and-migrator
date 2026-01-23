@@ -142,6 +142,15 @@ CREATE TABLE protocols
     processing_timestamp TIMESTAMP
 );
 
+-- Put into its own table to a) speed up protocol queries and b) make it easier to process and store speeches on another machine than the server --
+--CREATE TABLE protocol_texts
+--(
+--    protocol_id INTEGER PRIMARY KEY REFERENCES protocols (id) ON DELETE CASCADE,
+--    text TEXT,
+--    updated TIMESTAMP,
+--    created TIMESTAMP
+--)
+
 -- Activities
 CREATE TABLE activities
 (

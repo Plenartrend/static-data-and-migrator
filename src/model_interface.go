@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -12,14 +13,16 @@ type CompleteSpeech struct {
 	Speaker         string `json:"speaker"`
 	SpeechTextStart string `json:"speech_text_start"`
 	SpeechTextEnd   string `json:"speech_text_end"`
+	GivenToProtocol bool   `json:"given_to_protocol"`
 }
 
 // StartedSpeech represents a speech that has started but is not yet complete
 type StartedSpeech struct {
-	Present            bool   `json:"present"`
-	Speaker            string `json:"speaker"`
-	BeginOfSpeechStart string `json:"begin_of_speech_start"`
-	BeginningTooShort  bool   `json:"beginning_too_short"`
+	Present           bool   `json:"present"`
+	Speaker           string `json:"speaker"`
+	SpeechTextStart   string `json:"speech_text_start"`
+	BeginningTooShort bool   `json:"beginning_too_short"`
+	GivenToProtocol   bool   `json:"given_to_protocol"`
 }
 
 // SpeechExtractionResponse represents the full response from the model
@@ -48,8 +51,10 @@ Return the speech in the completed section if it is complete, or in the "started
 Speeches always begin with the speaker being named (e.g., "Dr. Angela Merkel (CDU/CSU):" or "Manuela Schwesig (Mecklenburg-Vorpommern):").
 Note that questions or interjections also begin with a speaker name and should be included as part of the ongoing speech rather than separated.
 DO NOT INCLUDE organizational remarks by the president or vice president of the parliament, they are not speeches.
-'Erklärungen' and 'zu Protokoll gegebene Reden' also count as speeches if its done for or by a natural person. If the Erklärung or Rede is given for somebody else, affiliate it with that person. For example "Für Frau Ministerin Mona Neubaur gebe ich folgende
-Erklärung zu Protokoll" would be a speech for Mona Neubaur. "Für die Länder Hamburg und Bremen gebe ich folgende Erklärung zu Protokoll" is not done for or by a natural person, and therefore must be ignored. Only the speech or erklärung itself count, not the announcment that there generally is one.
+
+'Erklärungen' and 'zu Protokoll gegebene Reden' (speeches given to protocol and read by somebody else) also count as speeches. If the Erklärung or Rede is given for somebody else, affiliate it with that person. For example "Für Frau Ministerin Mona Neubaur gebe ich folgende
+Erklärung zu Protokoll" would be a speech for Mona Neubaur. ONLY INCLUDE THE SPEECH OR ERKLÄRUNG ITSELF, NO ANNOUNCEMENTS. ANNOUNCMENTS OF SPEECHES GIVEN TO PROTOCOL MUST BE IGNORED and not returned in any way, also not with flag given_to_protocol set to true. Better miss one than accidantly returning an announcment as speech.
+"Es gibt noch eine Erklärung zu Protokoll von Frau Ministerin Behrens (Niedersachsen)." is an announcment THAT MUST BE IGNORED. The speech will probably come much later in the text as Attachment. "Erklärung von Ministerin Bettina Martin (Mecklenburg-Vorpommern) zu Punkt 2 der Tagesordnung \n Für die Länder Mecklenburg-Vorpommern und Bremen gebe ich folgende Erklärung zu Protokoll" on the other starts a protocolled speech that must be included.
 
 You must return the first 15-30 words and the last 15-30 words of each speech in the original formatting, so I can programatically reconstruct the full speech.
 This uses less tokens than you returning the full speech. Therefore you must be CAREFUL TO MATCH EXACTLY THE ORIGINAL FORMATTING INCLUDING ANY ARTIFACTS LIKE NBSP AND ESPECIALLY NEWLINES.
@@ -61,9 +66,23 @@ CRITICAL RULES - EXACT SUBSTRING EXTRACTION:
 - DO NOT paraphrase, reformat, or reconstruct sentences
 - DO NOT add or remove any characters, spaces, or newlines
 - DO NOT CHANGE THE CASING OF ANY LETTER
-- NEVER SKIP SPEECHES, WE NEED ALL OF THEM.
 - EVERY character must match the original PERFECTLY
 - The rule is: AS FEW WORDS AS POSSIBLE, BUT AS MANY AS NECESSARY TO IDENTIFY THE SPEECH; NEVER MORE THAN 30 WORDS.
+
+EXAMPLES:
+
+Input Chunk:
+Mir liegt eine Wortmeldung von Frau Ministerpräsidentin Schwesig, Mecklenburg-Vorpommern, vor.
+Manuela Schwesig (Mecklenburg-Vorpommern):
+Sehr geehrter Präsident! Liebe Kolleginnen und Kollegen! Zunächst möchte ich unserem neuen Bundesratspräsidenten ganz herzlich gratulieren. Lieber Kollege Andreas Bovenschulte, viel Erfolg! [many more words] Und wir wollen die Aufklärung stärken, zum Beispiel in der schulischen Medienbildung. Wer frühzeitig lernt, wie solche Mechanismen funktionieren, kann sich besser schützen. Zusammengefasst: Spielspaß ja, aber Glücksspiel nein, schon gar nicht für unsere Kinder. Vielen Dank.
+
+Output JSON (completed_speech):
+{
+  "speaker": "Friedrich Merz",
+  "speech_text_start": "Sehr geehrter Präsident! Liebe Kolleginnen und Kollegen! Zunächst möchte ich unserem neuen Bundesratspräsidenten ganz herzlich gratulieren.",
+  "speech_text_end": "Zusammengefasst: Spielspaß ja, aber Glücksspiel nein, schon gar nicht für unsere Kinder. Vielen Dank.",
+  "given_to_protocol": false
+}
 `
 
 // This is an exemplary response schema for gemini. If you want to change the response schema
@@ -77,7 +96,8 @@ func GetExemplaryResponseSchema() genai.Schema {
 				Type:        "array",
 				Description: "List of speeches that both start and end within this chunk.",
 				Items: &genai.Schema{
-					Type: "object",
+					Type:     "object",
+					Required: []string{"speaker", "speech_text_start", "speech_text_end", "given_to_protocol"},
 					Properties: map[string]*genai.Schema{
 						"speaker": {
 							Type:        "string",
@@ -85,11 +105,15 @@ func GetExemplaryResponseSchema() genai.Schema {
 						},
 						"speech_text_start": {
 							Type:        "string",
-							Description: "EXACT substring: The first 15-30 words of the speech copied character-by-character from the original text. NO ellipsis (..), NO paraphrasing, NO changes. Must include exact formatting with NBSP, newlines, and all artifacts. Also include interruptions by others like interjections or clapping if they are in the original text.",
+							Description: "EXACT substring: The first 15-30 words (NOT MORE) of the speech copied character-by-character from the original text. NO ellipsis (..), NO paraphrasing, NO changes. Must include exact formatting with NBSP, newlines, and all artifacts. Also include interruptions by others like interjections or clapping if they are in the original text.",
 						},
 						"speech_text_end": {
 							Type:        "string",
-							Description: "EXACT substring: The last 15-30 words of the speech copied character-by-character from the original text. NO ellipsis (..), NO paraphrasing, NO changes. Must include exact formatting with NBSP, newlines, and all artifacts. Also include interruptions by others like interjections or clapping if they are in the original text.",
+							Description: "EXACT substring: The last 15-30 words (NOT MORE) of the speech copied character-by-character from the original text. NO ellipsis (..), NO paraphrasing, NO changes. Must include exact formatting with NBSP, newlines, and all artifacts. Also include interruptions by others like interjections or clapping if they are in the original text.",
+						},
+						"given_to_protocol": {
+							Type:        "boolean",
+							Description: "Indicates if the speech is a 'zu Protokoll gegebene Rede', so if its given to protocol and read by somebody else. Only true if its clearly given to protocol AND IF IT IS A FULL SPEECH AND NOT ONLY THE ANNOUNCEMENT. False if the speech is a regular live speech, which is the regular case.",
 						},
 					},
 				},
@@ -106,13 +130,17 @@ func GetExemplaryResponseSchema() genai.Schema {
 						Type:        "string",
 						Description: "The full name of the speaker that gave the started speech. Do NOT INCLUDE titles like 'Dr.' or 'Prof.'",
 					},
-					"begin_of_speech_start": {
+					"speech_text_start": {
 						Type:        "string",
-						Description: "EXACT substring: The first 15-30 words of the speech copied character-by-character from the original text. NO ellipsis (..), NO paraphrasing, NO changes. Must include exact formatting with NBSP, newlines, and all artifacts. Also include interruptions by others like interjections or clapping if they are in the original text.",
+						Description: "EXACT substring: The first 15-30 words of the speech copied character-by-character from the original text. MUST be truncated after 30 words. DO NOT return the complete speech. NO ellipsis (..), NO paraphrasing, NO changes. Must include exact formatting with NBSP, newlines, and all artifacts. Also include interruptions by others like interjections or clapping if they are in the original text.",
 					},
 					"beginning_too_short": {
 						Type:        "boolean",
 						Description: "Indicates if the beginning of the speech is too short or generic because the chunk ended soon after the beginning. Only set to true if the beginning is very likely too generic to identify the text. ONLY do this if you are really sure that the beginning is too short, as this can lead to errors.",
+					},
+					"given_to_protocol": {
+						Type:        "boolean",
+						Description: "Indicates if the speech is a 'zu Protokoll gegebene Rede', so if its given to protocol and read by somebody else. Only true if its clearly given to protocol AND IS A FULL SPEECH AND NOT ONLY THE ANNOUNCEMENT (!!!!!). False if the speech is a regular live speech, which is the regular case.",
 					},
 				},
 			},
@@ -127,6 +155,12 @@ func ParseModelResponse(responseText string, logger *Logger) (*SpeechExtractionR
 	var response SpeechExtractionResponse
 	if err := json.Unmarshal([]byte(responseText), &response); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal speech extraction response: %w", err)
+	}
+	var prettyResponse bytes.Buffer
+	if err := json.Indent(&prettyResponse, []byte(responseText), "", "  "); err != nil {
+		logger.Debug(fmt.Sprintf("Parsed model response (raw): %s", responseText))
+	} else {
+		logger.Debug(fmt.Sprintf("Parsed model response (pretty):\n%s", prettyResponse.String()))
 	}
 
 	if response.CompleteSpeeches == nil {
@@ -153,8 +187,8 @@ func ParseModelResponse(responseText string, logger *Logger) (*SpeechExtractionR
 		} else if response.StartedSpeech.Speaker == "" {
 			logger.Warn("started_speech.present is true but speaker is empty, treating as not present")
 			response.StartedSpeech = nil
-		} else if response.StartedSpeech.BeginOfSpeechStart == "" {
-			logger.Warn(fmt.Sprintf("started_speech.present is true but begin_of_speech_start is empty for speaker %s, treating as not present", response.StartedSpeech.Speaker))
+		} else if response.StartedSpeech.SpeechTextStart == "" {
+			logger.Warn(fmt.Sprintf("started_speech.present is true but speech_text_start is empty for speaker %s, treating as not present", response.StartedSpeech.Speaker))
 			response.StartedSpeech = nil
 		}
 	}

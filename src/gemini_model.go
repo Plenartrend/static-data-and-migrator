@@ -52,18 +52,21 @@ func (gm *GeminiModel) GenerateContent(query []string, logger *Logger) (*SpeechE
 			Parts: queryParts,
 		},
 	}
-
+	temperature := float32(0.1)
+	thinkingBudget := int32(2048)
 	resp, err := gm.client.Models.GenerateContent(context.Background(), geminiModel, queryContent, &genai.GenerateContentConfig{
 		SystemInstruction:  gm.systemInstruction,
 		ResponseMIMEType:   "application/json",
 		ResponseJsonSchema: gm.responseSchema,
+		Temperature:        &temperature,
+		ThinkingConfig:     &genai.ThinkingConfig{ThinkingBudget: &thinkingBudget},
 	})
 	if err != nil {
 		logger.Error(fmt.Sprintf("failed to generate content: %v", err))
 		return nil, fmt.Errorf("failed to generate content: %w", err)
 	}
 	responseText := resp.Text()
-	logger.Debug(fmt.Sprintf("Gemini model response: %s", responseText))
+	//logger.Debug(fmt.Sprintf("Gemini model response: %s", responseText))
 
 	return ParseModelResponse(responseText, logger)
 }

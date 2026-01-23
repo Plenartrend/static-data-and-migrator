@@ -27,19 +27,18 @@ func resetActivities(protocolId int, db DBInterface, logger *Logger) error {
 	return nil
 }
 
-func addTextToActivity(protocolId int, speaker string, speech string, db DBInterface, logger *Logger) error {
-	logger.Debug(fmt.Sprintf(
-		"[addTextToActivity] Called with protocolId=%d, speaker='%s', speech length=%d and speech text:\n%s",
-		protocolId, speaker, len(speech), speech,
-	))
+func addTextToActivity(protocolId int, speaker string, givenToProtocol bool, speech string, db DBInterface, logger *Logger) error {
 	var activityId int
-
+	var speechType string = "Rede"
+	if givenToProtocol {
+		speechType = "Rede (zu Protokoll gegeben)"
+	}
 	err := db.Get(&activityId, `
 			SELECT a.id
 			FROM activities a, roles r
 			WHERE a.role_id = r.id
 				AND a.protocol_id = $1
-				AND (a.type = 'Rede' OR a.type = 'Rede (zu Protokoll gegeben)')
+				AND a.type = $3
 				AND (
 					(r.name_suffix IS NOT NULL AND r.name_suffix != '' AND CONCAT(r.first_name, ' ', r.name_suffix, ' ', r.last_name) = $2)
 					OR ((r.name_suffix IS NULL OR r.name_suffix = '') AND CONCAT(r.first_name, ' ', r.last_name) = $2)
@@ -47,43 +46,42 @@ func addTextToActivity(protocolId int, speaker string, speech string, db DBInter
 				AND (a.text IS NULL OR a.text = '')
 			ORDER BY a.id asc
 			LIMIT 1
-		`, protocolId, speaker)
+		`, protocolId, speaker, speechType)
 
 	if err == sql.ErrNoRows {
 		logger.Warn(fmt.Sprintf("could not correlate speech by speaker '%s' in protocol %d to an activity", speaker, protocolId))
 		return nil
 	} else if err != nil {
 		logger.Error(fmt.Sprintf(
-			"[addTextToActivity] DB error during SELECT for activityId (protocolId=%d, speaker='%s'): %v",
+			"[addTextToActivity] DB error during SELECT for activityId (protocolId=%d, speaker='%s', speechType='%s'): %v",
 			protocolId, speaker, err,
 		))
 		return fmt.Errorf("failed to find activity for speaker %s in protocol %d: %w", speaker, protocolId, err)
 	}
 
-	logger.Debug(fmt.Sprintf("[addTextToActivity] Found activityId=%d for speaker='%s' in protocolId=%d", activityId, speaker, protocolId))
+	logger.Debug(fmt.Sprintf("[addTextToActivity] Found activityId=%d for speaker='%s' in protocolId=%d and speechType='%s'", activityId, speaker, protocolId, speechType))
 
 	cleanedSpeech := strings.ToValidUTF8(speech, "")
 	if cleanedSpeech != speech {
 		logger.Debug(fmt.Sprintf("[addTextToActivity] Speech text changed by ToValidUTF8 sanitization:\n%s\n", cleanedSpeech))
 	}
-	logger.Debug(fmt.Sprintf("[addTextToActivity] Updating activityId=%d with sanitized speech text (length=%d)",
+	logger.Debug(fmt.Sprintf("[addTextToActivity] Updating activityId=%d with sanitized speech text (length=%d) and speechType='%s'",
 		activityId, len(cleanedSpeech),
 	))
 
 	_, err = db.Exec("UPDATE activities SET text = $2 WHERE id = $1", activityId, cleanedSpeech)
 	if err != nil {
 		logger.Error(fmt.Sprintf(
-			"[addTextToActivity] UPDATE failed for activityId=%d, speaker='%s': %v", activityId, speaker, err,
+			"[addTextToActivity] UPDATE failed for activityId=%d, speaker='%s' and speechType='%s': %v", activityId, speaker, speechType, err,
 		))
-		return fmt.Errorf("failed to update activity %d with speech for speaker %s: %w", activityId, speaker, err)
+		return fmt.Errorf("failed to update activity %d with speech for speaker %s and speechType '%s': %w", activityId, speaker, speechType, err)
 	}
 
-	logger.Debug(fmt.Sprintf("[addTextToActivity] Successfully updated activityId=%d with speech for speaker='%s' in protocolId=%d", activityId, speaker, protocolId))
+	logger.Debug(fmt.Sprintf("[addTextToActivity] Successfully updated activityId=%d with speech for speaker='%s' in protocolId=%d and speechType='%s'", activityId, speaker, protocolId, speechType))
 	return nil
 }
 
 func processSpeeches(protocol *Protocol, chunkSize *int, db DBInterface, logger *Logger) error {
-
 	err := resetActivities(protocol.ID, db, logger)
 	if err != nil {
 		return fmt.Errorf("failed to reset activities for protocol %d: %w", protocol.ID, err)
@@ -137,13 +135,16 @@ func processSpeeches(protocol *Protocol, chunkSize *int, db DBInterface, logger 
 		}
 
 		response, err := model.GenerateContent(query, logger)
-
 		if err != nil {
-			return err
+			logger.Error(fmt.Sprintf("failed to generate content; retrying once: %v", err))
+			response, err = model.GenerateContent(query, logger)
+			if err != nil {
+				logger.Error(fmt.Sprintf("failed to generate content: %v", err))
+				return fmt.Errorf("failed to generate content: %w", err)
+			}
 		}
 
 		for _, speech := range response.CompleteSpeeches {
-			// Skip if any required field is empty (validation already logged in unmarshal function)
 			if speech.Speaker == "" || speech.SpeechTextStart == "" || speech.SpeechTextEnd == "" {
 				continue
 			}
@@ -160,7 +161,7 @@ func processSpeeches(protocol *Protocol, chunkSize *int, db DBInterface, logger 
 			}
 
 			logger.Info(fmt.Sprintf("Complete speech for Speaker %s (length=%d)", speech.Speaker, len(fullSpeech)))
-			err = addTextToActivity(protocolId, speech.Speaker, fullSpeech, db, logger)
+			err = addTextToActivity(protocolId, speech.Speaker, speech.GivenToProtocol, fullSpeech, db, logger)
 			if err != nil {
 				return fmt.Errorf("failed to add completed speech to activity: %w", err)
 			}
@@ -177,7 +178,7 @@ func processSpeeches(protocol *Protocol, chunkSize *int, db DBInterface, logger 
 			previouslyUnfinishedSpeech = PreviouslyUnfinishedSpeech{
 				Present:           true,
 				Speaker:           response.StartedSpeech.Speaker,
-				SpeechStart:       response.StartedSpeech.BeginOfSpeechStart,
+				SpeechStart:       response.StartedSpeech.SpeechTextStart,
 				BeginningTooShort: response.StartedSpeech.BeginningTooShort,
 			}
 
@@ -311,9 +312,9 @@ func processNextProtocol(logger *Logger) (bool, error) {
 		defer tx.Rollback()
 
 		chunkSize := 50_000
-		if protocol.AttemptsCount == 1 {
+		if protocol.AttemptsCount == 2 {
 			chunkSize = 25_000 //Attempt smaller chunksSize
-		} else if protocol.AttemptsCount == 2 {
+		} else if protocol.AttemptsCount == 3 {
 			chunkSize = 75_000 //Attempt larger chunksSize
 		}
 

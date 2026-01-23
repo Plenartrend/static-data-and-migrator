@@ -94,9 +94,12 @@ func (om *OllamaModel) GenerateContent(query []string, logger *Logger) (*SpeechE
 				Content: userContent,
 			},
 		},
-		Format:  json.RawMessage(formatBytes),
-		Stream:  &stream,
-		Options: map[string]any{},
+		Format: json.RawMessage(formatBytes),
+		Stream: &stream,
+		Options: map[string]any{
+			"temperature": 0.1,
+		},
+		Think: &api.ThinkValue{Value: false},
 	}
 
 	var responseText string
@@ -125,6 +128,11 @@ func convertGenaiSchemaToJSONSchema(schema genai.Schema) map[string]any {
 	// Convert description
 	if schema.Description != "" {
 		result["description"] = schema.Description
+	}
+
+	// Convert required fields
+	if schema.Required != nil && len(schema.Required) > 0 {
+		result["required"] = schema.Required
 	}
 
 	// Convert properties
@@ -156,6 +164,11 @@ func convertGenaiSchemaProperty(schema *genai.Schema) map[string]any {
 
 	if schema.Description != "" {
 		result["description"] = schema.Description
+	}
+
+	// Convert required fields
+	if schema.Required != nil && len(schema.Required) > 0 {
+		result["required"] = schema.Required
 	}
 
 	// Convert properties (for nested objects)
