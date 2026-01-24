@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -624,16 +623,7 @@ func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInter
 	return nil
 }
 
-func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitializeNewerThan *time.Time) error {
-	reinitializeData := reinitializeActivities || reinitializeEntities
-	db, err := sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
-	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
-	}
-	defer db.Close()
-
-	initIngestionWorker()
-
+func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) error {
 	// Logger uses db connection (not transaction) so logs always commit even if transaction rolls back
 	consoleLogLevel := Debug
 	logger := NewLogger(db, &consoleLogLevel, nil)
@@ -645,13 +635,6 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 		}
 	}
 
-	if reinitializeNewerThan != nil {
-		logger.Info(fmt.Sprintf("ingesting data. reinitialize activities: %t, reinitialize entities: %t, reinitialize newer than: %s", reinitializeActivities, reinitializeEntities, reinitializeNewerThan.Format("2006-01-02 15:04:05")))
-	} else {
-		logger.Info(fmt.Sprintf("ingesting data. reinitialize activities: %t, reinitialize entities: %t, reinitialize newer than not given", reinitializeActivities, reinitializeEntities))
-	}
-
-	// Begin transaction
 	tx, err := db.Beginx()
 	if err != nil {
 		err = fmt.Errorf("failed to begin transaction: %w", err)
@@ -667,23 +650,27 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 		}
 	}()
 
-	if reinitializeEntities {
-		err = clearEntitiesDatabase(reinitializeNewerThan, tx, logger)
+	if reinitialize {
+		err = clearEntitiesDatabase(nil, tx, logger)
 		if err != nil {
 			err = fmt.Errorf("failed to clear entities database: %w", err)
 			logIngestionError(err)
 			return err
 		}
-	}
-	if reinitializeActivities {
-		err = clearActivitiesDatabase(reinitializeNewerThan, tx, logger)
+		err = clearActivitiesDatabase(nil, tx, logger)
 		if err != nil {
 			err = fmt.Errorf("failed to clear activities database: %w", err)
 			logIngestionError(err)
 			return err
 		}
+		_, err := tx.Exec("DELETE FROM ingestion_logs")
+		if err != nil {
+			err = fmt.Errorf("failed to clear ingestion logs: %w", err)
+			logIngestionError(err)
+			return err
+		}
 	}
-	// Create a client with the DIP API server URL
+
 	client, err := dip.NewClientWithResponses(
 		"https://search.dip.bundestag.de/api/v1",
 		dip.WithRequestEditorFn(func(ctx context.Context, req *http.Request) error {
@@ -698,122 +685,117 @@ func ingestData(reinitializeActivities bool, reinitializeEntities bool, reinitia
 		return err
 	}
 
-	var currentTimestamp = time.Now().UTC()
-	lastSuccessTimestamp := time.Time{}
-
-	if reinitializeData && reinitializeNewerThan != nil {
-		lastSuccessTimestamp = *reinitializeNewerThan
-		logger.Info(fmt.Sprintf("last success timestamp for reinitialization: %s", lastSuccessTimestamp))
-	} else if !reinitializeData {
-		lastSuccessTimestamp, err = getLastSuccessTimestamp(tx, logger)
-		logger.Info(fmt.Sprintf("last success timestamp from database: %s", lastSuccessTimestamp))
-		if err != nil {
-			err = fmt.Errorf("failed to get last success timestamp: %w", err)
-			logIngestionError(err)
-			return err
-		}
-	}
-
 	//------Ingestion Begins------//
 
-	if reinitializeEntities || !reinitializeData {
-		logger.Info("ingesting persons")
+	var currentTimestamp = time.Now().UTC()
 
-		err = ingestPersons(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
-		if err != nil {
-			err = fmt.Errorf("failed to ingest persons: %w", err)
-			logIngestionError(err)
-			txErr = err
-			return err
-		}
+	logger.Info("ingesting persons")
 
-		logger.Debug("Waiting for all person ingestion tasks to complete...")
-		ingestionWG.Wait()
-		logger.Info("All person ingestion tasks completed")
-
-		time.Sleep(ingestionSleepTime)
+	personIngestTimestamp, err := getLastSuccessTimestamp(tx, logger, time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		err = fmt.Errorf("failed to get last success timestamp for persons: %w", err)
+		logIngestionError(err)
+		return err
+	}
+	err = ingestPersons(client, personIngestTimestamp, currentTimestamp, tx, logger)
+	if err != nil {
+		err = fmt.Errorf("failed to ingest persons: %w", err)
+		logIngestionError(err)
+		txErr = err
+		return err
 	}
 
-	if reinitializeActivities || !reinitializeData {
+	logger.Debug("Waiting for all person ingestion tasks to complete...")
+	ingestionWG.Wait()
+	logger.Info("All person ingestion tasks completed")
 
-		logger.Info("ingesting protocols")
+	time.Sleep(ingestionSleepTime)
 
-		err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
-		if err != nil {
-			err = fmt.Errorf("failed to ingest protocols: %w", err)
-			logIngestionError(err)
-			txErr = err
-			return err
-		}
+	logger.Info("ingesting protocols")
 
-		logger.Debug("Waiting for all protocol ingestion tasks to complete...")
-		ingestionWG.Wait()
-		logger.Info("All protocol ingestion tasks completed")
-
-		time.Sleep(ingestionSleepTime)
-
-		logger.Info("ingesting printed papers")
-
-		err = ingestPrintedPapers(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
-		if err != nil {
-			err = fmt.Errorf("failed to ingest printed papers: %w", err)
-			logIngestionError(err)
-			txErr = err
-			return err
-		}
-
-		logger.Debug("Waiting for all printed paper ingestion tasks to complete...")
-		ingestionWG.Wait()
-		logger.Info("All printed paper ingestion tasks completed")
-
-		time.Sleep(ingestionSleepTime)
-
-		logger.Info("ingesting processes")
-
-		err = ingestProcesses(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
-		if err != nil {
-			err = fmt.Errorf("failed to ingest processes: %w", err)
-			logIngestionError(err)
-			txErr = err
-			return err
-		}
-
-		logger.Debug("Waiting for all process ingestion tasks to complete...")
-		ingestionWG.Wait()
-		logger.Info("All process ingestion tasks completed")
-
-		time.Sleep(ingestionSleepTime)
-
-		logger.Info("ingesting process positions")
-
-		err = ingestProcessPositions(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
-		if err != nil {
-			err = fmt.Errorf("failed to ingest process positions: %w", err)
-			logIngestionError(err)
-			txErr = err
-			return err
-		}
-
-		logger.Debug("Waiting for all process position ingestion tasks to complete...")
-		ingestionWG.Wait()
-		logger.Info("All process position ingestion tasks completed")
-
-		time.Sleep(ingestionSleepTime)
-
-		logger.Info("ingesting activities")
-
-		err = ingestActivities(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
-		if err != nil {
-			err = fmt.Errorf("failed to ingest activities: %w", err)
-			logIngestionError(err)
-			txErr = err
-			return err
-		}
-
-		logger.Debug("Waiting for all activity ingestion tasks to complete...")
-		ingestionWG.Wait()
-		logger.Info("All activity ingestion tasks completed")
+	lastSuccessTimestamp, err := getLastSuccessTimestamp(tx, logger, initializeNewerThan)
+	logger.Info(fmt.Sprintf("last success timestamp from database: %s", lastSuccessTimestamp))
+	if err != nil {
+		err = fmt.Errorf("failed to get last success timestamp: %w", err)
+		logIngestionError(err)
+		return err
 	}
+
+	err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+	if err != nil {
+		err = fmt.Errorf("failed to ingest protocols: %w", err)
+		logIngestionError(err)
+		txErr = err
+		return err
+	}
+
+	logger.Debug("Waiting for all protocol ingestion tasks to complete...")
+	ingestionWG.Wait()
+	logger.Info("All protocol ingestion tasks completed")
+
+	time.Sleep(ingestionSleepTime)
+
+	logger.Info("ingesting printed papers")
+
+	err = ingestPrintedPapers(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+	if err != nil {
+		err = fmt.Errorf("failed to ingest printed papers: %w", err)
+		logIngestionError(err)
+		txErr = err
+		return err
+	}
+
+	logger.Debug("Waiting for all printed paper ingestion tasks to complete...")
+	ingestionWG.Wait()
+	logger.Info("All printed paper ingestion tasks completed")
+
+	time.Sleep(ingestionSleepTime)
+
+	logger.Info("ingesting processes")
+
+	err = ingestProcesses(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+	if err != nil {
+		err = fmt.Errorf("failed to ingest processes: %w", err)
+		logIngestionError(err)
+		txErr = err
+		return err
+	}
+
+	logger.Debug("Waiting for all process ingestion tasks to complete...")
+	ingestionWG.Wait()
+	logger.Info("All process ingestion tasks completed")
+
+	time.Sleep(ingestionSleepTime)
+
+	logger.Info("ingesting process positions")
+
+	err = ingestProcessPositions(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+	if err != nil {
+		err = fmt.Errorf("failed to ingest process positions: %w", err)
+		logIngestionError(err)
+		txErr = err
+		return err
+	}
+
+	logger.Debug("Waiting for all process position ingestion tasks to complete...")
+	ingestionWG.Wait()
+	logger.Info("All process position ingestion tasks completed")
+
+	time.Sleep(ingestionSleepTime)
+
+	logger.Info("ingesting activities")
+
+	err = ingestActivities(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+	if err != nil {
+		err = fmt.Errorf("failed to ingest activities: %w", err)
+		logIngestionError(err)
+		txErr = err
+		return err
+	}
+
+	logger.Debug("Waiting for all activity ingestion tasks to complete...")
+	ingestionWG.Wait()
+	logger.Info("All activity ingestion tasks completed")
 
 	// Commit transaction
 	if err = tx.Commit(); err != nil {

@@ -6,11 +6,11 @@ import (
 	"time"
 )
 
-func getLastSuccessTimestamp(db DBInterface, logger *Logger) (time.Time, error) {
+func getLastSuccessTimestamp(db DBInterface, logger *Logger, defaultTime time.Time) (time.Time, error) {
 	var lastSuccessTimestamp time.Time
 	err := db.Get(&lastSuccessTimestamp, "SELECT l.timestamp FROM ingestion_logs l WHERE l.status = 'success' ORDER BY l.timestamp DESC LIMIT 1")
 	if err == sql.ErrNoRows {
-		lastSuccessTimestamp = time.Date(2026, 01, 01, 0, 0, 0, 0, time.UTC) //TODO: In prod this is emoty (minimal) date
+		lastSuccessTimestamp = defaultTime
 	} else if err != nil {
 		logger.Error(fmt.Sprintf("Failed to query last success timestamp: %v", err))
 		return time.Time{}, fmt.Errorf("failed to query last success timestamp: %w", err)
