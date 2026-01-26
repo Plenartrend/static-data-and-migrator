@@ -1819,17 +1819,17 @@ components:
         funktion:
           type: "array"
           items:
-          type: "string"
+            type: "string"
           example: ["LMin Soz u. Frauen"]
         funktionszusatz:
           type: "array"
           items:
-          type: "string"
+            type: "string"
           example: ["Stellv. MdBR"]
         fraktion:
           type: "array"
           items:
-          type: "string"
+            type: "string"
           example: ["CDU/CSU"]
         wahlkreiszusatz:
           type: "string"
@@ -1837,12 +1837,12 @@ components:
         ressort:
           type: "array"
           items:
-          type: "string"
+            type: "string"
           example: ["Bundesministerium für Familie, Senioren, Frauen und Jugend"]
         bundesland:
           type: "array"
           items:
-          $ref: "#/components/schemas/Bundesland"
+            $ref: "#/components/schemas/Bundesland"
         person_roles:
           type: "array"
           items:

@@ -1,0 +1,58 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+README.md
+LICENSE
+*.md
+
+# Development files
+dockerfile.dev
+docker-compose.dev.yml
+.air.toml
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Test files
+*_test.go
+testdata/
+
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+static-data-and-migrator
+
+# Temporary files
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# Environment files (should be provided at runtime)
+.env
+.env.local
+.env.*.local
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker files (except production Dockerfile)
+docker-compose*.yml
+.dockerignore
+
+# Analysis and schema files (if not needed in container)
+analysis_queries.sql
+schema.sql
+

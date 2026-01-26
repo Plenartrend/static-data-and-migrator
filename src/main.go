@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -33,6 +35,42 @@ func getDateOrDefault(dateStr string, defaultTime time.Time) (time.Time, error) 
 var INGEST_ACTIVITIES_START_DATE = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
 var INGESTION_SLEEP_DURATION = 1 * time.Hour
 
+func buildDatabaseURL() (string, error) {
+	requiredVars := map[string]string{
+		"DATABASE_USER":     os.Getenv("DATABASE_USER"),
+		"DATABASE_PASSWORD": os.Getenv("DATABASE_PASSWORD"),
+		"DATABASE_HOST":     os.Getenv("DATABASE_HOST"),
+		"DATABASE_PORT":     os.Getenv("DATABASE_PORT"),
+		"DATABASE_NAME":     os.Getenv("DATABASE_NAME"),
+	}
+
+	var missingVars []string
+	for varName, varValue := range requiredVars {
+		if varValue == "" {
+			missingVars = append(missingVars, varName)
+		}
+	}
+
+	if len(missingVars) > 0 {
+		return "", fmt.Errorf("missing required environment variables: %s", strings.Join(missingVars, ", "))
+	}
+
+	user := url.QueryEscape(requiredVars["DATABASE_USER"])
+	password := url.QueryEscape(requiredVars["DATABASE_PASSWORD"])
+	host := requiredVars["DATABASE_HOST"]
+	port := requiredVars["DATABASE_PORT"]
+	dbname := requiredVars["DATABASE_NAME"]
+
+	databaseURL := fmt.Sprintf("postgres://%s:%s@%s:%s/%s", user, password, host, port, dbname)
+
+	sslmode := os.Getenv("DATABASE_SSLMODE")
+	if sslmode != "" {
+		databaseURL += "?sslmode=" + url.QueryEscape(sslmode)
+	}
+
+	return databaseURL, nil
+}
+
 func runIngestionLoop(db *sqlx.DB, logger *Logger) {
 	for {
 		if !ingestionWorkerRunning {
@@ -55,14 +93,16 @@ func runIngestionLoop(db *sqlx.DB, logger *Logger) {
 }
 
 func main() {
-	err := godotenv.Load()
+	_ = godotenv.Load()
+
+	databaseURL, err := buildDatabaseURL()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Fatalf("Database configuration error: %v", err)
 	}
 
 	var db *sqlx.DB
 	for true {
-		db, err = sqlx.Connect("postgres", os.Getenv("DATABASE_URL"))
+		db, err = sqlx.Connect("postgres", databaseURL)
 		if err == nil {
 			defer db.Close()
 			break
