@@ -167,9 +167,73 @@ type ElectionPeriod struct {
 type IngestionStatus string
 
 const (
-	IngestionStatusSuccess IngestionStatus = "success"
-	IngestionStatusFailed  IngestionStatus = "failed"
+	IngestionStatusInProgress IngestionStatus = "in_progress"
+	IngestionStatusSuccess    IngestionStatus = "success"
+	IngestionStatusFailed     IngestionStatus = "failed"
 )
+
+/*
+type IngestionStep int
+
+const (
+	IngestionStepPersons IngestionStep = iota
+	IngestionStepProtocols
+	IngestionStepPrintedPapers
+	IngestionStepProcesses
+	IngestionStepProcessPositions
+	IngestionStepActivities
+)
+
+var ingestionStepStrings = map[IngestionStep]string{
+	IngestionStepPersons:          "persons",
+	IngestionStepProtocols:        "protocols",
+	IngestionStepPrintedPapers:    "printed_papers",
+	IngestionStepProcesses:        "processes",
+	IngestionStepProcessPositions: "process_positions",
+	IngestionStepActivities:       "activities",
+}
+
+func (s IngestionStep) String() string {
+	return ingestionStepStrings[s]
+}
+
+func ParseIngestionStep(s string) (IngestionStep, bool) {
+	for step, name := range ingestionStepStrings {
+		if name == s {
+			return step, true
+		}
+	}
+	return 0, false
+}
+*/
+
+type IngestionStep string
+
+const (
+	IngestionStepPersons          IngestionStep = "persons"
+	IngestionStepProtocols        IngestionStep = "protocols"
+	IngestionStepPrintedPapers    IngestionStep = "printed_papers"
+	IngestionStepProcesses        IngestionStep = "processes"
+	IngestionStepProcessPositions IngestionStep = "process_positions"
+	IngestionStepActivities       IngestionStep = "activities"
+)
+
+func (s IngestionStep) Next() (IngestionStep, bool) {
+	switch s {
+	case IngestionStepPersons:
+		return IngestionStepProtocols, true
+	case IngestionStepProtocols:
+		return IngestionStepPrintedPapers, true
+	case IngestionStepPrintedPapers:
+		return IngestionStepProcesses, true
+	case IngestionStepProcesses:
+		return IngestionStepProcessPositions, true
+	case IngestionStepProcessPositions:
+		return IngestionStepActivities, true
+	default:
+		return "", false
+	}
+}
 
 type ProcessingStatus string
 
@@ -184,6 +248,7 @@ type IngestionLog struct {
 	ID           int             `db:"id" json:"id,omitempty"`
 	Timestamp    time.Time       `db:"timestamp" json:"timestamp,omitempty"`
 	Status       IngestionStatus `db:"status" json:"status,omitempty"`
+	Step         IngestionStep   `db:"step" json:"step,omitempty"`
 	ErrorMessage sql.NullString  `db:"error_message" json:"error_message,omitempty"`
 }
 

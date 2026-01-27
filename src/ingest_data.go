@@ -26,6 +26,8 @@ type DBInterface interface {
 	QueryRow(query string, args ...interface{}) *sql.Row
 }
 
+type IngestionStepFunc func(*dip.ClientWithResponses, time.Time, time.Time, DBInterface, *Logger) error
+
 var ingestionWG sync.WaitGroup
 var ingestionsTasks = make(chan func())
 var workerOnce sync.Once
@@ -625,51 +627,132 @@ func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInter
 	return nil
 }
 
+// TODO do we really want to do this in a transaction?
+func clearDB(db *sqlx.DB, logger *Logger) error {
+	tx, err := db.Beginx()
+	if err != nil {
+		return fmt.Errorf("failed to begin clear transaction: %w", err)
+	}
+
+	err = clearEntitiesDatabase(nil, tx, logger)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to clear entities database: %w", err)
+	}
+
+	err = clearActivitiesDatabase(nil, tx, logger)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to clear activities database: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		err = fmt.Errorf("failed to commit clear transaction: %w", err)
+		return err
+	}
+
+	logger.Info("Database cleared")
+	return nil
+}
+
+func ingestStep(client dip.ClientWithResponses, step IngestionStep, stepFunc IngestionStepFunc, db *sqlx.DB, logger *Logger, initializeNewerThan time.Time) error {
+	logger.Info(fmt.Sprintf("Ingesting %s", step))
+
+	logIngestionError := func(err error, ingestionLogID int) {
+		if err != nil {
+			logger.Error(fmt.Sprintf("Failed to ingest data: %v", err))
+			_, _ = db.Exec("UPDATE ingestion_logs SET status = 'failed', error_message = $1 WHERE id = $2", err.Error(), ingestionLogID)
+		}
+	}
+
+	var logId int
+	err = db.Select(&logId, "INSERT INTO ingestion_logs (timestamp, status, step, error_message) VALUES ($1, 'in_progress', $2, NULL) RETURNING id", initializeNewerThan, step)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to create ingestion log: %v", err))
+		return err
+	}
+
+	tx, err := db.Beginx()
+	if err != nil {
+		err = fmt.Errorf("failed to begin transaction for %s: %w", step.String(), err)
+		logIngestionError(err, ingestionLog.ID)
+		return err
+	}
+
+	if err != nil {
+		tx.Rollback()
+		err = fmt.Errorf("failed to get last success timestamp for %s: %w", step.String(), err)
+		logIngestionError(err, ingestionLog.ID)
+		return err
+	}
+
+	err = stepFunc(client, lastSuccessTimestamp, startTimestamp, tx, logger)
+	if err != nil {
+		tx.Rollback()
+		err = fmt.Errorf("failed to ingest %s: %w", step.String(), err)
+		logIngestionError(err, ingestionLog.ID)
+		return err
+	}
+
+	logger.Debug(fmt.Sprintf("Waiting for all %s ingestion tasks to complete...", step.String()))
+	ingestionWG.Wait()
+	logger.Info(fmt.Sprintf("All %s ingestion tasks completed", step.String()))
+
+	if err = tx.Commit(); err != nil {
+		err = fmt.Errorf("failed to commit transaction for %s: %w", step.String(), err)
+		logIngestionError(err, ingestionLog.ID)
+		return err
+	}
+
+	_, err = db.Exec("UPDATE ingestion_logs SET step = $1 WHERE id = $2", step.String(), ingestionLog.ID)
+	if err != nil {
+		err = fmt.Errorf("failed to update step for %s: %w", step.String(), err)
+		logIngestionError(err, ingestionLog.ID)
+		return err
+	}
+
+	logger.Info(fmt.Sprintf("Completed step: %s", step.String()))
+
+	_, err = db.Exec("UPDATE ingestion_logs SET status = 'success', step = NULL, timestamp = $1 WHERE id = $2", time.Now().UTC(), ingestionLog.ID)
+	if err != nil {
+		err = fmt.Errorf("failed to update ingestion log to success: %w", err)
+		logger.Error(err.Error())
+		return err
+	}
+
+	return nil
+}
+
 func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) error {
 	// Logger uses db connection (not transaction) so logs always commit even if transaction rolls back
 	consoleLogLevel := Debug
 	logger := NewLogger(db, &consoleLogLevel, nil)
 
-	logIngestionError := func(err error) {
+	logIngestionError := func(err error, ingestionLogID int) {
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to ingest data: %v", err))
-			_, _ = db.Exec("INSERT INTO ingestion_logs (timestamp, status, error_message) VALUES (NOW(), 'failed', $1)", err.Error())
+			_, _ = db.Exec("UPDATE ingestion_logs SET status = 'failed', error_message = $1 WHERE id = $2", err.Error(), ingestionLogID)
 		}
 	}
 
-	tx, err := db.Beginx()
-	if err != nil {
-		err = fmt.Errorf("failed to begin transaction: %w", err)
-		logIngestionError(err)
+	var lastStep IngestionStep
+	err := db.Select(&lastStep, "SELECT step FROM ingestion_logs WHERE status = 'success' ORDER BY timestamp DESC LIMIT 1")
+
+	if err != nil && err != sql.ErrNoRows {
+		logger.Error(fmt.Sprintf("failed to query in-progress ingestion: %v", err))
 		return err
 	}
-	var txErr error
-	defer func() {
-		if txErr != nil {
-			if rollbackErr := tx.Rollback(); rollbackErr != nil {
-				logger.Error(fmt.Sprintf("failed to rollback transaction: %v", rollbackErr))
-			}
-		}
-	}()
+
+	_, ok := lastStep.Next() // Only returns true if there is a next step, also works with empty lastStep
+	if ok {
+		reinitialize = false
+	}
 
 	if reinitialize {
-		err = clearEntitiesDatabase(nil, tx, logger)
+		err := clearDB(db, logger)
 		if err != nil {
-			err = fmt.Errorf("failed to clear entities database: %w", err)
-			logIngestionError(err)
-			return err
-		}
-		err = clearActivitiesDatabase(nil, tx, logger)
-		if err != nil {
-			err = fmt.Errorf("failed to clear activities database: %w", err)
-			logIngestionError(err)
-			return err
-		}
-		_, err := tx.Exec("DELETE FROM ingestion_logs")
-		if err != nil {
-			err = fmt.Errorf("failed to clear ingestion logs: %w", err)
-			logIngestionError(err)
-			return err
+			logger.Error(fmt.Sprintf("failed to clear database: %v", err))
+			return fmt.Errorf("failed to clear database: %w", err)
 		}
 	}
 
@@ -682,137 +765,48 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 		}),
 	)
 	if err != nil {
-		err = fmt.Errorf("failed to create client: %w", err)
-		logIngestionError(err)
-		return err
+		logger.Error(fmt.Sprintf("failed to create DIP client: %v", err))
+		return fmt.Errorf("failed to create DIP client: %w", err)
 	}
 
 	//------Ingestion Begins------//
 
+	stepMap := map[IngestionStep]IngestionStepFunc{
+		IngestionStepPersons:          ingestPersons,
+		IngestionStepProtocols:        ingestProtocols,
+		IngestionStepPrintedPapers:    ingestPrintedPapers,
+		IngestionStepProcesses:        ingestProcesses,
+		IngestionStepProcessPositions: ingestProcessPositions,
+		IngestionStepActivities:       ingestActivities,
+	}
+
+	nextStep, ok := lastStep.Next()
+
+	if !ok {
+		nextStep = IngestionStepPersons
+		ok = true
+	}
+
+	lastSuccessTimestampPerson, err := getLastSuccessTimestamp(db, logger, time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC))
+	lastSuccessTimestamp, err := getLastSuccessTimestamp(db, logger, initializeNewerThan)
+
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to get last success timestamp: %v", err))
+		return fmt.Errorf("failed to get last success timestamp: %w", err)
+	}
+
 	var startTimestamp = time.Now().UTC()
 
-	logger.Info("ingesting persons")
+	for ok {
+		err = ingestStep(*client, nextStep, stepMap[nextStep], db, logger, lastSuccessTimestamp)
+		if err != nil {
+			logger.Error(fmt.Sprintf("ingestion step %s failed: %v", nextStep, err))
+			return fmt.Errorf("ingestion step %s failed: %w", nextStep, err)
+		}
 
-	personIngestTimestamp, err := getLastSuccessTimestamp(tx, logger, time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC))
-	if err != nil {
-		err = fmt.Errorf("failed to get last success timestamp for persons: %w", err)
-		logIngestionError(err)
-		return err
-	}
-	err = ingestPersons(client, personIngestTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest persons: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
+		nextStep, ok = IngestionStep(nextStep).Next()
 
-	logger.Debug("Waiting for all person ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All person ingestion tasks completed")
-
-	time.Sleep(ingestionSleepTime)
-
-	logger.Info("ingesting protocols")
-
-	lastSuccessTimestamp, err := getLastSuccessTimestamp(tx, logger, initializeNewerThan)
-	logger.Info(fmt.Sprintf("last success timestamp from database: %s", lastSuccessTimestamp))
-	if err != nil {
-		err = fmt.Errorf("failed to get last success timestamp: %w", err)
-		logIngestionError(err)
-		return err
-	}
-
-	err = ingestProtocols(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest protocols: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	logger.Debug("Waiting for all protocol ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All protocol ingestion tasks completed")
-
-	time.Sleep(ingestionSleepTime)
-
-	logger.Info("ingesting printed papers")
-
-	err = ingestPrintedPapers(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest printed papers: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	logger.Debug("Waiting for all printed paper ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All printed paper ingestion tasks completed")
-
-	time.Sleep(ingestionSleepTime)
-
-	logger.Info("ingesting processes")
-
-	err = ingestProcesses(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest processes: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	logger.Debug("Waiting for all process ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All process ingestion tasks completed")
-
-	time.Sleep(ingestionSleepTime)
-
-	logger.Info("ingesting process positions")
-
-	err = ingestProcessPositions(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest process positions: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	logger.Debug("Waiting for all process position ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All process position ingestion tasks completed")
-
-	time.Sleep(ingestionSleepTime)
-
-	logger.Info("ingesting activities")
-
-	err = ingestActivities(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest activities: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	logger.Debug("Waiting for all activity ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All activity ingestion tasks completed")
-
-	// Commit transaction
-	if err = tx.Commit(); err != nil {
-		err = fmt.Errorf("failed to commit transaction: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	_, err = db.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES ($1, 'success')", time.Now().UTC())
-	if err != nil {
-		err = fmt.Errorf("failed to insert ingestion log: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
+		time.Sleep(ingestionSleepTime)
 	}
 
 	logger.Info(fmt.Sprintf("Ingestion completed successfully within %v", time.Since(startTimestamp)))

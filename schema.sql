@@ -1,14 +1,12 @@
--- Schema for Plenartrend database
-
-DROP SCHEMA IF EXISTS plenartrend CASCADE;
-CREATE SCHEMA plenartrend;
-SET SCHEMA 'plenartrend';
-SET SEARCH_PATH TO plenartrend;
+-- Drop and recreate public schema to ensure a clean state
+DROP SCHEMA IF EXISTS public CASCADE;
+CREATE SCHEMA public;
 
 -- Enum types
 CREATE TYPE document_type AS ENUM ('protocol', 'printedPaper');
 CREATE TYPE body AS ENUM ('BT', 'BR', 'BV', 'EK');
-CREATE TYPE ingestion_status AS ENUM ('success', 'failed');
+CREATE TYPE ingestion_status AS ENUM ('in_progress', 'success', 'failed');
+CREATE TYPE ingestion_step AS ENUM ('persons', 'protocols', 'printed_papers', 'processes', 'process_positions', 'activities');
 CREATE TYPE log_status AS ENUM ('debug', 'info', 'warn', 'error', 'fatal');
 
 -- Topics table
@@ -200,6 +198,7 @@ CREATE TABLE ingestion_logs
     id            SERIAL PRIMARY KEY,
     timestamp     TIMESTAMP        NOT NULL,
     status        ingestion_status NOT NULL,
+    step          ingestion_step,
     error_message TEXT
 );
 

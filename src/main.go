@@ -93,7 +93,7 @@ func runIngestionLoop(db *sqlx.DB, logger *Logger) {
 }
 
 func main() {
-	_ = godotenv.Load()
+	_ = godotenv.Load() // Do not fail if .env is missing, as we set the environment variables directly in production
 
 	databaseURL, err := buildDatabaseURL()
 	if err != nil {
