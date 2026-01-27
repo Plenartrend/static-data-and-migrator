@@ -35,6 +35,9 @@ func getDateOrDefault(dateStr string, defaultTime time.Time) (time.Time, error) 
 var INGEST_ACTIVITIES_START_DATE = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
 var INGESTION_SLEEP_DURATION = 1 * time.Hour
 
+var logLevel LogStatus
+var serviceLogPrefix = "Ingest"
+
 func buildDatabaseURL() (string, error) {
 	requiredVars := map[string]string{
 		"DATABASE_USER":     os.Getenv("DATABASE_USER"),
@@ -112,9 +115,11 @@ func main() {
 	}
 
 	initIngestionWorker()
-
-	consoleLogLevel := Debug
-	logger := NewLogger(db, &consoleLogLevel, nil)
+	logLevel, err = GetLogLevel(os.Getenv("LOG_LEVEL"))
+	if err != nil {
+		log.Fatalf("Failed to get log level: %v", err)
+	}
+	logger := NewLogger(db, &logLevel, &logLevel, serviceLogPrefix)
 
 	INGEST_ACTIVITIES_START_DATE, err = getDateOrDefault(os.Getenv("INGEST_ACTIVITIES_START_DATE"), INGEST_ACTIVITIES_START_DATE)
 	if err != nil {

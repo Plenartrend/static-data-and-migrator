@@ -627,8 +627,7 @@ func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInter
 
 func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) error {
 	// Logger uses db connection (not transaction) so logs always commit even if transaction rolls back
-	consoleLogLevel := Debug
-	logger := NewLogger(db, &consoleLogLevel, nil)
+	logger := NewLogger(db, &logLevel, &logLevel, serviceLogPrefix)
 
 	logIngestionError := func(err error) {
 		if err != nil {

@@ -1,9 +1,9 @@
 -- Schema for Plenartrend database
 
-DROP SCHEMA IF EXISTS plenartrend CASCADE;
+DROP SCHEMA IF EXISTS public CASCADE;
 CREATE SCHEMA plenartrend;
-SET SCHEMA 'plenartrend';
-SET SEARCH_PATH TO plenartrend;
+SET SCHEMA public;
+SET SEARCH_PATH TO public;
 
 -- Enum types
 CREATE TYPE document_type AS ENUM ('protocol', 'printedPaper');
