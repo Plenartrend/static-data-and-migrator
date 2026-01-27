@@ -49,11 +49,13 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 	var errMutex sync.Mutex
 
 	for {
+		beforePersonrequestTimestamp := time.Now().UTC()
 		resp, err := client.GetPersonListWithResponse(context.Background(), &dip.GetPersonListParams{
 			FAktualisiertStart: &lastSuccessTimestamp,
 			FAktualisiertEnd:   &currentTimestamp,
 			Cursor:             cursor,
 		})
+		logger.Debug(fmt.Sprintf("Person request took %v", time.Since(beforePersonrequestTimestamp)))
 		if err != nil {
 			return fmt.Errorf("failed to ingest persons: %w", err)
 		}
@@ -687,7 +689,7 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 
 	//------Ingestion Begins------//
 
-	var currentTimestamp = time.Now().UTC()
+	var startTimestamp = time.Now().UTC()
 
 	logger.Info("ingesting persons")
 
@@ -697,7 +699,7 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 		logIngestionError(err)
 		return err
 	}
-	err = ingestPersons(client, personIngestTimestamp, currentTimestamp, tx, logger)
+	err = ingestPersons(client, personIngestTimestamp, startTimestamp, tx, logger)
 	if err != nil {
 		err = fmt.Errorf("failed to ingest persons: %w", err)
 		logIngestionError(err)
@@ -721,7 +723,7 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 		return err
 	}
 
-	err = ingestProtocols(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+	err = ingestProtocols(client, lastSuccessTimestamp, startTimestamp, tx, logger)
 	if err != nil {
 		err = fmt.Errorf("failed to ingest protocols: %w", err)
 		logIngestionError(err)
@@ -737,7 +739,7 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 
 	logger.Info("ingesting printed papers")
 
-	err = ingestPrintedPapers(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+	err = ingestPrintedPapers(client, lastSuccessTimestamp, startTimestamp, tx, logger)
 	if err != nil {
 		err = fmt.Errorf("failed to ingest printed papers: %w", err)
 		logIngestionError(err)
@@ -753,7 +755,7 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 
 	logger.Info("ingesting processes")
 
-	err = ingestProcesses(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+	err = ingestProcesses(client, lastSuccessTimestamp, startTimestamp, tx, logger)
 	if err != nil {
 		err = fmt.Errorf("failed to ingest processes: %w", err)
 		logIngestionError(err)
@@ -769,7 +771,7 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 
 	logger.Info("ingesting process positions")
 
-	err = ingestProcessPositions(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+	err = ingestProcessPositions(client, lastSuccessTimestamp, startTimestamp, tx, logger)
 	if err != nil {
 		err = fmt.Errorf("failed to ingest process positions: %w", err)
 		logIngestionError(err)
@@ -785,7 +787,7 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 
 	logger.Info("ingesting activities")
 
-	err = ingestActivities(client, lastSuccessTimestamp, currentTimestamp, tx, logger)
+	err = ingestActivities(client, lastSuccessTimestamp, startTimestamp, tx, logger)
 	if err != nil {
 		err = fmt.Errorf("failed to ingest activities: %w", err)
 		logIngestionError(err)
@@ -813,6 +815,6 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 		return err
 	}
 
-	logger.Info("Ingestion completed successfully")
+	logger.Info(fmt.Sprintf("Ingestion completed successfully within %v", time.Since(startTimestamp)))
 	return nil
 }
