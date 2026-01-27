@@ -15,7 +15,10 @@ import (
 	"github.com/lib/pq"
 )
 
-const requestTimeout = 100 * time.Millisecond
+const defaultRequestTimeout = 100 * time.Millisecond
+
+var requestTimeout = defaultRequestTimeout
+
 const ingestionSleepTime = 1 * time.Second
 
 // DBInterface allows using either *sqlx.DB or *sqlx.Tx
@@ -655,8 +658,29 @@ func clearDB(db *sqlx.DB, logger *Logger) error {
 	return nil
 }
 
-func ingestStep(client dip.ClientWithResponses, step IngestionStep, stepFunc IngestionStepFunc, db *sqlx.DB, logger *Logger, initializeNewerThan time.Time) error {
+func updateRequestTimeout(db *sqlx.DB, logger *Logger) error {
+	var status IngestionStatus
+	err := db.Get(&status, "SELECT status FROM ingestion_logs ORDER BY updated DESC LIMIT 1")
+	if err != nil {
+		return fmt.Errorf("failed to get last ingestion status: %w", err)
+	}
+	if status == IngestionStatusSuccess {
+		logger.Info("Last ingestion was successful, resetting request timeout to default")
+		requestTimeout = defaultRequestTimeout
+	} else {
+		logger.Info("Last ingestion was not successful, increasing request timeout")
+		requestTimeout = defaultRequestTimeout * 2
+	}
+	return nil
+}
+
+func ingestStep(client dip.ClientWithResponses, step IngestionStep, stepFunc IngestionStepFunc, from time.Time, to time.Time, db *sqlx.DB, logger *Logger) error {
 	logger.Info(fmt.Sprintf("Ingesting %s", step))
+	err := updateRequestTimeout(db, logger)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to update request timeout: %v", err))
+		return err
+	}
 
 	logIngestionError := func(err error, ingestionLogID int) {
 		if err != nil {
@@ -666,7 +690,7 @@ func ingestStep(client dip.ClientWithResponses, step IngestionStep, stepFunc Ing
 	}
 
 	var logId int
-	err = db.Select(&logId, "INSERT INTO ingestion_logs (timestamp, status, step, error_message) VALUES ($1, 'in_progress', $2, NULL) RETURNING id", initializeNewerThan, step)
+	err = db.Get(&logId, "INSERT INTO ingestion_logs (ingest_from, ingest_to, status, step, error_message) VALUES ($1, $2, 'in_progress', $3, NULL) RETURNING id", from, to, step)
 	if err != nil {
 		logger.Error(fmt.Sprintf("failed to create ingestion log: %v", err))
 		return err
@@ -674,52 +698,37 @@ func ingestStep(client dip.ClientWithResponses, step IngestionStep, stepFunc Ing
 
 	tx, err := db.Beginx()
 	if err != nil {
-		err = fmt.Errorf("failed to begin transaction for %s: %w", step.String(), err)
-		logIngestionError(err, ingestionLog.ID)
+		err = fmt.Errorf("failed to begin transaction for %s: %w", step, err)
+		logIngestionError(err, logId)
 		return err
 	}
 
+	defer tx.Rollback()
+
+	err = stepFunc(&client, from, to, tx, logger)
 	if err != nil {
-		tx.Rollback()
-		err = fmt.Errorf("failed to get last success timestamp for %s: %w", step.String(), err)
-		logIngestionError(err, ingestionLog.ID)
+		err = fmt.Errorf("failed to ingest %s: %w", step, err)
+		logIngestionError(err, logId)
 		return err
 	}
 
-	err = stepFunc(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		tx.Rollback()
-		err = fmt.Errorf("failed to ingest %s: %w", step.String(), err)
-		logIngestionError(err, ingestionLog.ID)
-		return err
-	}
-
-	logger.Debug(fmt.Sprintf("Waiting for all %s ingestion tasks to complete...", step.String()))
+	logger.Debug(fmt.Sprintf("Waiting for all %s ingestion tasks to complete...", step))
 	ingestionWG.Wait()
-	logger.Info(fmt.Sprintf("All %s ingestion tasks completed", step.String()))
 
-	if err = tx.Commit(); err != nil {
-		err = fmt.Errorf("failed to commit transaction for %s: %w", step.String(), err)
-		logIngestionError(err, ingestionLog.ID)
-		return err
-	}
-
-	_, err = db.Exec("UPDATE ingestion_logs SET step = $1 WHERE id = $2", step.String(), ingestionLog.ID)
-	if err != nil {
-		err = fmt.Errorf("failed to update step for %s: %w", step.String(), err)
-		logIngestionError(err, ingestionLog.ID)
-		return err
-	}
-
-	logger.Info(fmt.Sprintf("Completed step: %s", step.String()))
-
-	_, err = db.Exec("UPDATE ingestion_logs SET status = 'success', step = NULL, timestamp = $1 WHERE id = $2", time.Now().UTC(), ingestionLog.ID)
+	_, err = tx.Exec("UPDATE ingestion_logs SET status = 'success', step=$1 , ingest_from = $2, ingest_to = $3 WHERE id = $4", step, from, to, logId)
 	if err != nil {
 		err = fmt.Errorf("failed to update ingestion log to success: %w", err)
 		logger.Error(err.Error())
 		return err
 	}
+	logger.Info(fmt.Sprintf("All %s ingestion tasks completed, committing transaction...", step))
+	if err = tx.Commit(); err != nil {
+		err = fmt.Errorf("failed to commit transaction for %s: %w", step, err)
+		logIngestionError(err, logId)
+		return err
+	}
 
+	logger.Info(fmt.Sprintf("Completed step: %s", step))
 	return nil
 }
 
@@ -728,15 +737,8 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 	consoleLogLevel := Debug
 	logger := NewLogger(db, &consoleLogLevel, nil)
 
-	logIngestionError := func(err error, ingestionLogID int) {
-		if err != nil {
-			logger.Error(fmt.Sprintf("Failed to ingest data: %v", err))
-			_, _ = db.Exec("UPDATE ingestion_logs SET status = 'failed', error_message = $1 WHERE id = $2", err.Error(), ingestionLogID)
-		}
-	}
-
 	var lastStep IngestionStep
-	err := db.Select(&lastStep, "SELECT step FROM ingestion_logs WHERE status = 'success' ORDER BY timestamp DESC LIMIT 1")
+	err := db.Get(&lastStep, "SELECT step FROM ingestion_logs WHERE status = 'success' ORDER BY updated DESC LIMIT 1")
 
 	if err != nil && err != sql.ErrNoRows {
 		logger.Error(fmt.Sprintf("failed to query in-progress ingestion: %v", err))
@@ -787,18 +789,25 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 		ok = true
 	}
 
-	lastSuccessTimestampPerson, err := getLastSuccessTimestamp(db, logger, time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC))
-	lastSuccessTimestamp, err := getLastSuccessTimestamp(db, logger, initializeNewerThan)
-
-	if err != nil {
-		logger.Error(fmt.Sprintf("failed to get last success timestamp: %v", err))
-		return fmt.Errorf("failed to get last success timestamp: %w", err)
-	}
-
 	var startTimestamp = time.Now().UTC()
 
+	fromPersons, toPersons, err := getNextIngestPeriod(db, logger, time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to get next ingest period for persons: %v", err))
+		return fmt.Errorf("failed to get next ingest period for persons: %w", err)
+	}
+	from, to, err := getNextIngestPeriod(db, logger, initializeNewerThan)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to get next ingest period: %v", err))
+		return fmt.Errorf("failed to get next ingest period: %w", err)
+	}
+
 	for ok {
-		err = ingestStep(*client, nextStep, stepMap[nextStep], db, logger, lastSuccessTimestamp)
+		if nextStep == IngestionStepPersons {
+			err = ingestStep(*client, nextStep, stepMap[nextStep], fromPersons, toPersons, db, logger)
+		} else {
+			err = ingestStep(*client, nextStep, stepMap[nextStep], from, to, db, logger)
+		}
 		if err != nil {
 			logger.Error(fmt.Sprintf("ingestion step %s failed: %v", nextStep, err))
 			return fmt.Errorf("ingestion step %s failed: %w", nextStep, err)

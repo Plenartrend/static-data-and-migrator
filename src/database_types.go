@@ -246,10 +246,13 @@ const (
 
 type IngestionLog struct {
 	ID           int             `db:"id" json:"id,omitempty"`
-	Timestamp    time.Time       `db:"timestamp" json:"timestamp,omitempty"`
+	IngestFrom   time.Time       `db:"ingest_from" json:"ingest_from,omitempty"`
+	IngestTo     time.Time       `db:"ingest_to" json:"ingest_to,omitempty"`
 	Status       IngestionStatus `db:"status" json:"status,omitempty"`
 	Step         IngestionStep   `db:"step" json:"step,omitempty"`
 	ErrorMessage sql.NullString  `db:"error_message" json:"error_message,omitempty"`
+	Created      time.Time       `db:"created" json:"created,omitempty"`
+	Updated      time.Time       `db:"updated" json:"updated,omitempty"`
 }
 
 // TODO: Split protocol parts

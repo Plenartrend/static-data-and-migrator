@@ -196,10 +196,13 @@ CREATE TABLE process_positions
 CREATE TABLE ingestion_logs
 (
     id            SERIAL PRIMARY KEY,
-    timestamp     TIMESTAMP        NOT NULL,
+    ingest_from          TIMESTAMP        NOT NULL,
+    ingest_to            TIMESTAMP        NOT NULL,
     status        ingestion_status NOT NULL,
     step          ingestion_step,
-    error_message TEXT
+    error_message TEXT,
+    created       TIMESTAMP        NOT NULL,
+    updated       TIMESTAMP        NOT NULL
 );
 
 CREATE TABLE logs
@@ -297,5 +300,11 @@ EXECUTE FUNCTION set_timestamps();
 CREATE TRIGGER set_timestamps_activities
     BEFORE INSERT OR UPDATE
     ON activities
+    FOR EACH ROW
+EXECUTE FUNCTION set_timestamps();
+
+CREATE TRIGGER set_timestamps_ingestion_logs
+    BEFORE INSERT OR UPDATE
+    ON ingestion_logs
     FOR EACH ROW
 EXECUTE FUNCTION set_timestamps();

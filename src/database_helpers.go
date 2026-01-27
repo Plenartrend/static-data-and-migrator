@@ -6,16 +6,22 @@ import (
 	"time"
 )
 
-func getLastSuccessTimestamp(db DBInterface, logger *Logger, defaultTime time.Time) (time.Time, error) {
-	var lastSuccessTimestamp time.Time
-	err := db.Get(&lastSuccessTimestamp, "SELECT l.timestamp FROM ingestion_logs l WHERE l.status = 'success' ORDER BY l.timestamp DESC LIMIT 1")
+func getNextIngestPeriod(db DBInterface, logger *Logger, defaultFromTime time.Time) (time.Time, time.Time, error) {
+	var lastSuccessLog IngestionLog
+	err := db.Get(&lastSuccessLog, "SELECT * FROM ingestion_logs l WHERE l.status = 'success' ORDER BY l.updated DESC LIMIT 1")
 	if err == sql.ErrNoRows {
-		lastSuccessTimestamp = defaultTime
+		return defaultFromTime, time.Now(), nil
 	} else if err != nil {
 		logger.Error(fmt.Sprintf("Failed to query last success timestamp: %v", err))
-		return time.Time{}, fmt.Errorf("failed to query last success timestamp: %w", err)
+		t := time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC)
+		return t, t, nil
 	}
-	return lastSuccessTimestamp, nil
+
+	_, ok := lastSuccessLog.Step.Next()
+	if ok { //Ok means we found a next step, and are thus in the middle of an ingestion => Use same time perion
+		return lastSuccessLog.IngestFrom, lastSuccessLog.IngestTo, nil
+	}
+	return lastSuccessLog.IngestTo, time.Now(), nil //Start where we left off
 }
 
 // setRole sets a role in the database and logs a warning if it already exists. This happens because of low quality data in the API.
