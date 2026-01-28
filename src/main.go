@@ -96,7 +96,7 @@ func runIngestionLoop(db *sqlx.DB, logger *Logger) {
 }
 
 func main() {
-	_ = godotenv.Load()
+	_ = godotenv.Load() // Do not fail if .env is missing, as we set the environment variables directly in production
 
 	databaseURL, err := buildDatabaseURL()
 	if err != nil {
@@ -160,6 +160,7 @@ func main() {
 			fmt.Fprint(w, "Failed to parse reinitializeStartDate", err)
 			return
 		}
+		logger.Info(fmt.Sprintf("Reinitializing ingestion from %s", reinitializeStartDate))
 
 		err = ingestData(db, reinitializeStartDate, true)
 		if err != nil {

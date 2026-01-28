@@ -1,4 +1,5 @@
 # Synchronization considerations
+- Protocol processors cannot commit if a static-data-and-migrator ingestion is in progress, as that might lead to the static-data-and-migrator having to reset its work, which is much worse than aborting a single protocol processing step.
 
 ## requirements
 - atomic lock "ingest_lock"

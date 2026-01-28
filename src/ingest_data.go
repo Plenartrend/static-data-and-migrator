@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -15,7 +16,10 @@ import (
 	"github.com/lib/pq"
 )
 
-const requestTimeout = 100 * time.Millisecond
+const defaultRequestTimeout = 100 * time.Millisecond
+
+var requestTimeout = defaultRequestTimeout
+
 const ingestionSleepTime = 1 * time.Second
 
 // DBInterface allows using either *sqlx.DB or *sqlx.Tx
@@ -25,6 +29,8 @@ type DBInterface interface {
 	Select(dest interface{}, query string, args ...interface{}) error
 	QueryRow(query string, args ...interface{}) *sql.Row
 }
+
+type IngestionStepFunc func(*dip.ClientWithResponses, time.Time, time.Time, DBInterface, *Logger) error
 
 var ingestionWG sync.WaitGroup
 var ingestionsTasks = make(chan func())
@@ -107,9 +113,48 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 	return nil
 }
 
+func getElectionPeriodsForNewestRole(mainElectionPeriods []int32, roleElectionPeriods []int32) []int32 {
+	var result []int32
+	var maxPeriod int32 = -1
+	for _, period := range mainElectionPeriods {
+		if period > maxPeriod {
+			maxPeriod = period
+		}
+		if !slices.Contains(roleElectionPeriods, period) {
+			result = append(result, period)
+		}
+	}
+	if maxPeriod != -1 && !slices.Contains(result, maxPeriod) {
+		result = append(result, maxPeriod)
+	}
+	return result
+}
+
+func getRoleElectionPeriods(roles *[]dip.PersonRole) []int32 {
+	var result []int32
+	if roles == nil {
+		return result
+	}
+	for _, role := range *roles {
+		if role.WahlperiodeNummer != nil && len(*role.WahlperiodeNummer) > 0 {
+			for _, period := range *role.WahlperiodeNummer {
+				if !slices.Contains(result, period) {
+					result = append(result, period)
+				}
+			}
+		}
+	}
+	return result
+}
+
 func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
 	for _, p := range persons {
-		_, err := db.Exec("INSERT INTO persons (id, api_updated) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET api_updated = $2", p.Id, p.Aktualisiert)
+		_, err := db.Exec(`
+			INSERT INTO persons
+			(id, api_updated)
+			VALUES ($1, $2)
+			ON CONFLICT (id) DO NOTHING
+		`, p.Id, p.Aktualisiert)
 		if err != nil {
 			return fmt.Errorf("insert person %s: %w", p.Id, err)
 		}
@@ -140,6 +185,8 @@ func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error 
 		} else {
 			logger.Warn(fmt.Sprintf("person %s has no Wahlperiode, using -1", p.Id))
 		}
+
+		wahlperioden = getElectionPeriodsForNewestRole(wahlperioden, getRoleElectionPeriods(p.PersonRoles))
 
 		for _, wp := range wahlperioden {
 			electionPeriod, err := getOrSetElectionPeriod(db, int(wp), logger)
@@ -245,18 +292,37 @@ func processProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logge
 			electionPeriod = sql.NullInt32{Int32: int32(ep), Valid: true}
 		}
 
-		_, err := db.Exec(`
-			INSERT INTO protocols
-			(id, title, document_number, publisher, session_note, url, text, election_period, date, api_updated)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			ON CONFLICT (id) DO UPDATE SET
-				title = $2, document_number = $3, publisher = $4, session_note = $5, url = $6, text = $7, election_period = $8, date = $9,
-				api_updated = $10
-		`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
-			p.Aktualisiert)
+		exists := true
+
+		var existingProtocol Protocol
+		err := db.Get(&existingProtocol, "SELECT * FROM protocols WHERE id = $1", p.Id)
+
+		if err == sql.ErrNoRows {
+			exists = false
+		} else if err != nil {
+			return fmt.Errorf("check protocol existence: %w", err)
+		}
+
+		if exists {
+			if len(existingProtocol.Text) <= 1000 {
+				_, err = db.Exec(`
+					UPDATE protocols SET
+						text = $2,
+						api_updated = $3
+					WHERE id = $1
+				`, p.Id, sanitizeStringPtr(p.Text), p.Aktualisiert)
+			}
+		} else {
+			_, err = db.Exec(`
+				INSERT INTO protocols
+				(id, title, document_number, publisher, session_note, url, text, election_period, date, api_updated)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
+				p.Aktualisiert)
+		}
 
 		if err != nil {
-			return fmt.Errorf("failed to insert protocol %s: %w", p.Id, err)
+			return fmt.Errorf("failed to insert or update protocol %s: %w", p.Id, err)
 		}
 	}
 
@@ -307,6 +373,11 @@ func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp t
 
 func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, logger *Logger) error {
 	for _, p := range printedPapers {
+		if p.Wahlperiode == nil {
+			logger.Warn(fmt.Sprintf("printed paper %s has no Wahlperiode, skipping", p.Id))
+			continue
+		}
+
 		electionPeriod, err := getOrSetElectionPeriod(db, int(*p.Wahlperiode), logger)
 		if err != nil {
 			return fmt.Errorf("error getting/setting election period for protocol %s: %w", p.Id, err)
@@ -326,18 +397,38 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 			groupId = &gid
 		}
 
-		_, err = db.Exec(`
-			INSERT INTO printed_papers
-			(id, type, title, document_number, publisher, group_id, url, text, election_period, date, api_updated)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-			ON CONFLICT (id) DO UPDATE SET
-				type = $2, title = $3, document_number = $4, publisher = $5, group_id = $6, url = $7, text = $8, election_period = $9, date = $10,
-				api_updated = $11
-		`, p.Id, p.Drucksachetyp, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
-			p.Aktualisiert)
+		exists := true
+
+		var existingPrintedPaper PrintedPaper
+		err = db.Get(&existingPrintedPaper, "SELECT * FROM printed_papers WHERE id = $1", p.Id)
+
+		if err == sql.ErrNoRows {
+			exists = false
+		} else if err != nil {
+			return fmt.Errorf("check printed paper existence: %w", err)
+		}
+
+		if exists {
+			if len(existingPrintedPaper.Text) <= 1000 {
+				_, err = db.Exec(`
+					UPDATE printed_papers SET
+						text = $2,
+						api_updated = $3
+					WHERE id = $1
+				`, p.Id, sanitizeStringPtr(p.Text), p.Aktualisiert)
+			}
+			continue
+		} else {
+			_, err = db.Exec(`
+				INSERT INTO printed_papers
+				(id, type, title, document_number, publisher, group_id, url, text, election_period, date, api_updated)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			`, p.Id, p.Drucksachetyp, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
+				p.Aktualisiert)
+		}
 
 		if err != nil {
-			return fmt.Errorf("failed to insert printed paper %s: %w", p.Id, err)
+			return fmt.Errorf("failed to insert or update printed paper %s: %w", p.Id, err)
 		}
 	}
 
@@ -431,14 +522,13 @@ func processActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logg
 			protocolId = sql.NullInt32{Int32: pId, Valid: true}
 		}
 
-		var text string = "" // TODO what is the text of the activity?
+		var text string = "" // Will be added during processing of protocols/printed papers
 
 		_, err = db.Exec(`
 			INSERT INTO activities
 			(id, type, role_id, document_type, printed_paper_id, protocol_id, text, api_updated)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT (id) DO UPDATE SET
-				type = $2, role_id = $3, document_type = $4, printed_paper_id = $5, protocol_id = $6, text = $7, api_updated = $8
+			ON CONFLICT (id) DO NOTHING
 		`, a.Id, a.Aktivitaetsart, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
 
 		if err != nil {
@@ -503,9 +593,12 @@ func processProcesses(processes []dip.Vorgang, db DBInterface, logger *Logger) e
 		if p.Datum != nil {
 			date = sql.NullTime{Time: p.Datum.Time, Valid: true}
 		}
-		_, err = db.Exec("INSERT INTO processes (id, title, status, summary, keywords, election_period, type, date, api_updated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"+
-			" ON CONFLICT (id) DO UPDATE SET title = $2, status = $3, summary = $4, keywords = $5, election_period = $6, type = $7, date = $8, api_updated = $9",
-			p.Id, p.Titel, p.Beratungsstand, p.Abstract, keywords, electionPeriod, p.Vorgangstyp, date, p.Aktualisiert)
+		_, err = db.Exec(`
+			INSERT INTO processes
+			(id, title, status, summary, keywords, election_period, type, date, api_updated)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (id) DO NOTHING
+		`, p.Id, p.Titel, p.Beratungsstand, p.Abstract, keywords, electionPeriod, p.Vorgangstyp, date, p.Aktualisiert)
 		if err != nil {
 			return fmt.Errorf("failed to insert process %s: %w", p.Id, err)
 		}
@@ -517,7 +610,12 @@ func processProcesses(processes []dip.Vorgang, db DBInterface, logger *Logger) e
 			if err != nil {
 				return fmt.Errorf("failed to get or set group for process %s: %w", p.Id, err)
 			}
-			_, err = db.Exec("INSERT INTO process_initiators (process_id, group_id) VALUES ($1, $2) ON CONFLICT (process_id, group_id) DO NOTHING", p.Id, groupId)
+			_, err = db.Exec(`
+				INSERT INTO process_initiators
+				(process_id, group_id)
+				VALUES ($1, $2)
+				ON CONFLICT (process_id, group_id) DO NOTHING
+			`, p.Id, groupId)
 			if err != nil {
 				return fmt.Errorf("failed to insert process initiator for process %s: %w", p.Id, err)
 			}
@@ -609,10 +707,12 @@ func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInter
 			continue
 		}
 
-		_, err = db.Exec("INSERT INTO process_positions (id, type, process_id, printed_paper_id, protocol_id, association, continuation, supplement, title, document_type, date, api_updated) "+
-			"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) "+
-			"ON CONFLICT (id) DO UPDATE SET type = $2, process_id = $3, printed_paper_id = $4, protocol_id = $5, association = $6, continuation = $7, supplement = $8, title = $9, document_type = $10, date = $11, api_updated = $12",
-			p.Id, p.Vorgangstyp, p.VorgangId, printedPaperId, protocolId, p.Zuordnung, p.Fortsetzung, p.Nachtrag, p.Titel, documentType, p.Datum.Time, p.Aktualisiert)
+		_, err = db.Exec(`
+			INSERT INTO process_positions
+			(id, type, process_id, printed_paper_id, protocol_id, association, continuation, supplement, title, document_type, date, api_updated)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			ON CONFLICT (id) DO NOTHING
+		`, p.Id, p.Vorgangstyp, p.VorgangId, printedPaperId, protocolId, p.Zuordnung, p.Fortsetzung, p.Nachtrag, p.Titel, documentType, p.Datum.Time, p.Aktualisiert)
 		if err != nil {
 			// Check for foreign key violation (PostgreSQL code "23503")
 			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23503" {
@@ -625,50 +725,135 @@ func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInter
 	return nil
 }
 
-func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) error {
-	// Logger uses db connection (not transaction) so logs always commit even if transaction rolls back
-	logger := NewLogger(db, &logLevel, &logLevel, serviceLogPrefix)
+// TODO do we really want to do this in a transaction?
+func clearDB(db *sqlx.DB, logger *Logger) error {
+	tx, err := db.Beginx()
+	if err != nil {
+		return fmt.Errorf("failed to begin clear transaction: %w", err)
+	}
 
-	logIngestionError := func(err error) {
+	err = clearEntitiesDatabase(nil, tx, logger)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to clear entities database: %w", err)
+	}
+
+	err = clearActivitiesDatabase(nil, tx, logger)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to clear activities database: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		err = fmt.Errorf("failed to commit clear transaction: %w", err)
+		return err
+	}
+
+	logger.Info("Database cleared")
+	return nil
+}
+
+func updateRequestTimeout(db *sqlx.DB, logger *Logger) error {
+	var status IngestionStatus
+	err := db.Get(&status, "SELECT status FROM ingestion_logs ORDER BY updated DESC LIMIT 1")
+	if err == sql.ErrNoRows {
+		logger.Info("No ingestion logs found, resetting request timeout to default")
+		requestTimeout = defaultRequestTimeout
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to get last ingestion status: %w", err)
+	}
+	if status == IngestionStatusSuccess {
+		logger.Info("Last ingestion was successful, resetting request timeout to default")
+		requestTimeout = defaultRequestTimeout
+	} else {
+		logger.Info("Last ingestion was not successful, increasing request timeout")
+		requestTimeout = defaultRequestTimeout * 2
+	}
+	return nil
+}
+
+func ingestStep(client dip.ClientWithResponses, step IngestionStep, stepFunc IngestionStepFunc, from time.Time, to time.Time, db *sqlx.DB, logger *Logger) error {
+	logger.Info(fmt.Sprintf("Ingesting %s", step))
+	err := updateRequestTimeout(db, logger)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to update request timeout: %v", err))
+		return err
+	}
+
+	logIngestionError := func(err error, ingestionLogID int) {
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to ingest data: %v", err))
-			_, _ = db.Exec("INSERT INTO ingestion_logs (timestamp, status, error_message) VALUES (NOW(), 'failed', $1)", err.Error())
+			_, _ = db.Exec("UPDATE ingestion_logs SET status = 'failed', error_message = $1 WHERE id = $2", err.Error(), ingestionLogID)
 		}
+	}
+
+	var logId int
+	err = db.Get(&logId, "INSERT INTO ingestion_logs (ingest_from, ingest_to, status, step, error_message) VALUES ($1, $2, 'in_progress', $3, NULL) RETURNING id", from, to, step)
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to create ingestion log: %v", err))
+		return err
 	}
 
 	tx, err := db.Beginx()
 	if err != nil {
-		err = fmt.Errorf("failed to begin transaction: %w", err)
-		logIngestionError(err)
+		err = fmt.Errorf("failed to begin transaction for %s: %w", step, err)
+		logIngestionError(err, logId)
 		return err
 	}
-	var txErr error
-	defer func() {
-		if txErr != nil {
-			if rollbackErr := tx.Rollback(); rollbackErr != nil {
-				logger.Error(fmt.Sprintf("failed to rollback transaction: %v", rollbackErr))
-			}
-		}
-	}()
+
+	defer tx.Rollback()
+
+	err = stepFunc(&client, from, to, tx, logger)
+	if err != nil {
+		err = fmt.Errorf("failed to ingest %s: %w", step, err)
+		logIngestionError(err, logId)
+		return err
+	}
+
+	logger.Debug(fmt.Sprintf("Waiting for all %s ingestion tasks to complete...", step))
+	ingestionWG.Wait()
+
+	_, err = tx.Exec("UPDATE ingestion_logs SET status = 'success', step=$1 , ingest_from = $2, ingest_to = $3 WHERE id = $4", step, from, to, logId)
+	if err != nil {
+		err = fmt.Errorf("failed to update ingestion log to success: %w", err)
+		logger.Error(err.Error())
+		return err
+	}
+	logger.Info(fmt.Sprintf("All %s ingestion tasks completed, committing transaction...", step))
+	if err = tx.Commit(); err != nil {
+		err = fmt.Errorf("failed to commit transaction for %s: %w", step, err)
+		logIngestionError(err, logId)
+		return err
+	}
+
+	logger.Info(fmt.Sprintf("Completed step: %s", step))
+	return nil
+}
+
+func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) error {
+	// Logger uses db connection (not transaction) so logs always commit even if transaction rolls back
+	logger := NewLogger(db, &logLevel, &logLevel, serviceLogPrefix)
+
+	var lastStep IngestionStep
+	err := db.Get(&lastStep, "SELECT step FROM ingestion_logs WHERE status = 'success' ORDER BY updated DESC LIMIT 1")
+
+	if err != nil && err != sql.ErrNoRows {
+		logger.Error(fmt.Sprintf("failed to query in-progress ingestion: %v", err))
+		return err
+	}
+
+	_, ok := lastStep.Next() // Only returns true if there is a next step, also works with empty lastStep
+	if ok {
+		reinitialize = false
+	}
 
 	if reinitialize {
-		err = clearEntitiesDatabase(nil, tx, logger)
+		logger.Info("Clearing database")
+		err := clearDB(db, logger)
 		if err != nil {
-			err = fmt.Errorf("failed to clear entities database: %w", err)
-			logIngestionError(err)
-			return err
-		}
-		err = clearActivitiesDatabase(nil, tx, logger)
-		if err != nil {
-			err = fmt.Errorf("failed to clear activities database: %w", err)
-			logIngestionError(err)
-			return err
-		}
-		_, err := tx.Exec("DELETE FROM ingestion_logs")
-		if err != nil {
-			err = fmt.Errorf("failed to clear ingestion logs: %w", err)
-			logIngestionError(err)
-			return err
+			logger.Error(fmt.Sprintf("failed to clear database: %v", err))
+			return fmt.Errorf("failed to clear database: %w", err)
 		}
 	}
 
@@ -681,139 +866,58 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 		}),
 	)
 	if err != nil {
-		err = fmt.Errorf("failed to create client: %w", err)
-		logIngestionError(err)
-		return err
+		logger.Error(fmt.Sprintf("failed to create DIP client: %v", err))
+		return fmt.Errorf("failed to create DIP client: %w", err)
 	}
 
 	//------Ingestion Begins------//
 
+	stepMap := map[IngestionStep]IngestionStepFunc{
+		IngestionStepPersons:          ingestPersons,
+		IngestionStepProtocols:        ingestProtocols,
+		IngestionStepPrintedPapers:    ingestPrintedPapers,
+		IngestionStepProcesses:        ingestProcesses,
+		IngestionStepProcessPositions: ingestProcessPositions,
+		IngestionStepActivities:       ingestActivities,
+	}
+
+	nextStep, ok := lastStep.Next()
+
+	if !ok {
+		nextStep = IngestionStepPersons
+		ok = true
+	}
+
 	var startTimestamp = time.Now().UTC()
 
-	logger.Info("ingesting persons")
-
-	personIngestTimestamp, err := getLastSuccessTimestamp(tx, logger, time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC))
+	fromPersons, to, err := getNextIngestPeriod(db, logger, time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
-		err = fmt.Errorf("failed to get last success timestamp for persons: %w", err)
-		logIngestionError(err)
-		return err
+		logger.Error(fmt.Sprintf("failed to get next ingest period for persons: %v", err))
+		return fmt.Errorf("failed to get next ingest period for persons: %w", err)
 	}
-	err = ingestPersons(client, personIngestTimestamp, startTimestamp, tx, logger)
+	from, _, err := getNextIngestPeriod(db, logger, initializeNewerThan)
 	if err != nil {
-		err = fmt.Errorf("failed to ingest persons: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
+		logger.Error(fmt.Sprintf("failed to get next ingest period: %v", err))
+		return fmt.Errorf("failed to get next ingest period: %w", err)
 	}
+	logger.Info(fmt.Sprintf("Ingesting persons from %s to %s and all other steps from %s to %s", fromPersons, to, from, to))
 
-	logger.Debug("Waiting for all person ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All person ingestion tasks completed")
+	for ok {
+		if nextStep == IngestionStepPersons {
+			err = ingestStep(*client, nextStep, stepMap[nextStep], fromPersons, to, db, logger)
+		} else {
+			err = ingestStep(*client, nextStep, stepMap[nextStep], from, to, db, logger)
+		}
+		if err != nil {
+			logger.Error(fmt.Sprintf("ingestion step %s failed: %v", nextStep, err))
+			return fmt.Errorf("ingestion step %s failed: %w", nextStep, err)
+		}
 
-	time.Sleep(ingestionSleepTime)
-
-	logger.Info("ingesting protocols")
-
-	lastSuccessTimestamp, err := getLastSuccessTimestamp(tx, logger, initializeNewerThan)
-	logger.Info(fmt.Sprintf("last success timestamp from database: %s", lastSuccessTimestamp))
-	if err != nil {
-		err = fmt.Errorf("failed to get last success timestamp: %w", err)
-		logIngestionError(err)
-		return err
+		logger.Info(fmt.Sprintf("Starting next ingestion step: %s", nextStep))
+		nextStep, ok = IngestionStep(nextStep).Next()
+		logger.Info(fmt.Sprintf("Finished ingestion step: %s", nextStep))
+		time.Sleep(ingestionSleepTime)
 	}
-
-	err = ingestProtocols(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest protocols: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	logger.Debug("Waiting for all protocol ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All protocol ingestion tasks completed")
-
-	time.Sleep(ingestionSleepTime)
-
-	logger.Info("ingesting printed papers")
-
-	err = ingestPrintedPapers(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest printed papers: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	logger.Debug("Waiting for all printed paper ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All printed paper ingestion tasks completed")
-
-	time.Sleep(ingestionSleepTime)
-
-	logger.Info("ingesting processes")
-
-	err = ingestProcesses(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest processes: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	logger.Debug("Waiting for all process ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All process ingestion tasks completed")
-
-	time.Sleep(ingestionSleepTime)
-
-	logger.Info("ingesting process positions")
-
-	err = ingestProcessPositions(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest process positions: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	logger.Debug("Waiting for all process position ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All process position ingestion tasks completed")
-
-	time.Sleep(ingestionSleepTime)
-
-	logger.Info("ingesting activities")
-
-	err = ingestActivities(client, lastSuccessTimestamp, startTimestamp, tx, logger)
-	if err != nil {
-		err = fmt.Errorf("failed to ingest activities: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	logger.Debug("Waiting for all activity ingestion tasks to complete...")
-	ingestionWG.Wait()
-	logger.Info("All activity ingestion tasks completed")
-
-	// Commit transaction
-	if err = tx.Commit(); err != nil {
-		err = fmt.Errorf("failed to commit transaction: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
-	_, err = db.Exec("INSERT INTO ingestion_logs (timestamp, status) VALUES ($1, 'success')", time.Now().UTC())
-	if err != nil {
-		err = fmt.Errorf("failed to insert ingestion log: %w", err)
-		logIngestionError(err)
-		txErr = err
-		return err
-	}
-
 	logger.Info(fmt.Sprintf("Ingestion completed successfully within %v", time.Since(startTimestamp)))
 	return nil
 }
