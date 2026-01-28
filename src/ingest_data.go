@@ -22,6 +22,17 @@ var requestTimeout = defaultRequestTimeout
 
 const ingestionSleepTime = 1 * time.Second
 
+const ingestProgressLogEvery = 1000
+
+func shouldLogIngestProgress(prevCount, newCount int) bool {
+	// Log on first iteration (first page) and whenever the running count crosses
+	// a new 1000 boundary (1000, 2000, 3000, ...).
+	if prevCount == 0 {
+		return true
+	}
+	return newCount/ingestProgressLogEvery > prevCount/ingestProgressLogEvery
+}
+
 // DBInterface allows using either *sqlx.DB or *sqlx.Tx
 type DBInterface interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
@@ -58,7 +69,9 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 		resp, err := client.GetPersonListWithResponse(context.Background(), &dip.GetPersonListParams{
 			FAktualisiertStart: &lastSuccessTimestamp,
 			FAktualisiertEnd:   &currentTimestamp,
-			Cursor:             cursor,
+			//FDatumStart:        &dip.DatumStartFilter{Time: INGEST_ACTIVITIES_START_DATE},
+			FDatumEnd: &dip.DatumEndFilter{Time: currentTimestamp},
+			Cursor:    cursor,
 		})
 		logger.Debug(fmt.Sprintf("Person request took %v", time.Since(beforePersonrequestTimestamp)))
 		if err != nil {
@@ -86,9 +99,14 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 			}
 		}
 
+		prevCount := count
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
-		logger.Debug(fmt.Sprintf("Got %d persons with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		msg := fmt.Sprintf("Got %d persons with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound)
+		logger.Debug(msg)
+		if shouldLogIngestProgress(prevCount, count) {
+			logger.Info(msg)
+		}
 		time.Sleep(requestTimeout)
 	}
 
@@ -224,6 +242,8 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 		resp, err := client.GetPlenarprotokollTextListWithResponse(context.Background(), &dip.GetPlenarprotokollTextListParams{
 			FAktualisiertStart: &lastSuccessTimestamp,
 			FAktualisiertEnd:   &currentTimestamp,
+			FDatumStart:        &dip.DatumStartFilter{Time: INGEST_ACTIVITIES_START_DATE},
+			FDatumEnd:          &dip.DatumEndFilter{Time: currentTimestamp},
 			Cursor:             cursor,
 		})
 		if err != nil {
@@ -251,9 +271,14 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 			}
 		}
 
+		prevCount := count
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
-		logger.Debug(fmt.Sprintf("Got %d protocols with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		msg := fmt.Sprintf("Got %d protocols with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound)
+		logger.Debug(msg)
+		if shouldLogIngestProgress(prevCount, count) {
+			logger.Info(msg)
+		}
 		time.Sleep(requestTimeout)
 	}
 	return nil
@@ -323,6 +348,8 @@ func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp t
 		resp, err := client.GetDrucksacheTextListWithResponse(context.Background(), &dip.GetDrucksacheTextListParams{
 			FAktualisiertStart: &lastSuccessTimestamp,
 			FAktualisiertEnd:   &currentTimestamp,
+			FDatumStart:        &dip.DatumStartFilter{Time: INGEST_ACTIVITIES_START_DATE},
+			FDatumEnd:          &dip.DatumEndFilter{Time: currentTimestamp},
 			Cursor:             cursor,
 		})
 		if err != nil {
@@ -350,9 +377,14 @@ func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp t
 			}
 		}
 
+		prevCount := count
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
-		logger.Debug(fmt.Sprintf("Got %d printed papers with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		msg := fmt.Sprintf("Got %d printed papers with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound)
+		logger.Debug(msg)
+		if shouldLogIngestProgress(prevCount, count) {
+			logger.Info(msg)
+		}
 		time.Sleep(requestTimeout)
 	}
 
@@ -373,7 +405,7 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 
 		var groupId *int
 		if len(p.Fundstelle.Urheber) == 0 {
-			logger.Info(fmt.Sprintf("printed paper %s has no Urheber", p.Id))
+			logger.Debug(fmt.Sprintf("printed paper %s has no Urheber", p.Id))
 		} else {
 			if len(p.Fundstelle.Urheber) != 1 {
 				logger.Warn(fmt.Sprintf("printed paper %s has %d Urheber, expected 1, using first", p.Id, len(p.Fundstelle.Urheber)))
@@ -432,6 +464,8 @@ func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time
 		resp, err := client.GetAktivitaetListWithResponse(context.Background(), &dip.GetAktivitaetListParams{
 			FAktualisiertStart: &lastSuccessTimestamp,
 			FAktualisiertEnd:   &currentTimestamp,
+			FDatumStart:        &dip.DatumStartFilter{Time: INGEST_ACTIVITIES_START_DATE},
+			FDatumEnd:          &dip.DatumEndFilter{Time: currentTimestamp},
 			Cursor:             cursor,
 		})
 		if err != nil {
@@ -459,9 +493,14 @@ func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time
 			}
 		}
 
+		prevCount := count
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
-		logger.Debug(fmt.Sprintf("Got %d activities with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		msg := fmt.Sprintf("Got %d activities with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound)
+		logger.Debug(msg)
+		if shouldLogIngestProgress(prevCount, count) {
+			logger.Info(msg)
+		}
 		time.Sleep(requestTimeout)
 	}
 	return nil
@@ -539,6 +578,8 @@ func ingestProcesses(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 		resp, err := client.GetVorgangListWithResponse(context.Background(), &dip.GetVorgangListParams{
 			FAktualisiertStart: &lastSuccessTimestamp,
 			FAktualisiertEnd:   &currentTimestamp,
+			FDatumStart:        &dip.DatumStartFilter{Time: INGEST_ACTIVITIES_START_DATE},
+			FDatumEnd:          &dip.DatumEndFilter{Time: currentTimestamp},
 			Cursor:             cursor,
 		})
 		if err != nil {
@@ -565,9 +606,14 @@ func ingestProcesses(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 				}
 			}
 		}
+		prevCount := count
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
-		logger.Debug(fmt.Sprintf("Got %d processes with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		msg := fmt.Sprintf("Got %d processes with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound)
+		logger.Debug(msg)
+		if shouldLogIngestProgress(prevCount, count) {
+			logger.Info(msg)
+		}
 		time.Sleep(requestTimeout)
 	}
 	return nil
@@ -627,6 +673,8 @@ func ingestProcessPositions(client *dip.ClientWithResponses, lastSuccessTimestam
 		resp, err := client.GetVorgangspositionListWithResponse(context.Background(), &dip.GetVorgangspositionListParams{
 			FAktualisiertStart: &lastSuccessTimestamp,
 			FAktualisiertEnd:   &currentTimestamp,
+			FDatumStart:        &dip.DatumStartFilter{Time: INGEST_ACTIVITIES_START_DATE},
+			FDatumEnd:          &dip.DatumEndFilter{Time: currentTimestamp},
 			Cursor:             cursor,
 		})
 		if err != nil {
@@ -653,9 +701,14 @@ func ingestProcessPositions(client *dip.ClientWithResponses, lastSuccessTimestam
 				}
 			}
 		}
+		prevCount := count
 		count += len(documents)
 		cursor = &resp.JSON200.Cursor
-		logger.Debug(fmt.Sprintf("Got %d process positions with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
+		msg := fmt.Sprintf("Got %d process positions with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound)
+		logger.Debug(msg)
+		if shouldLogIngestProgress(prevCount, count) {
+			logger.Info(msg)
+		}
 		time.Sleep(requestTimeout)
 	}
 	return nil
@@ -907,6 +960,7 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 	logger.Info(fmt.Sprintf("Ingesting persons from %s to %s and all other steps from %s to %s", fromPersons, to, from, to))
 
 	for ok {
+		logger.Info(fmt.Sprintf("Starting next ingestion step: %s", nextStep))
 		if nextStep == IngestionStepPersons {
 			err = ingestStep(*client, nextStep, stepMap[nextStep], fromPersons, to, db, logger)
 		} else {
@@ -916,10 +970,9 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 			logger.Error(fmt.Sprintf("ingestion step %s failed: %v", nextStep, err))
 			return fmt.Errorf("ingestion step %s failed: %w", nextStep, err)
 		}
-
-		logger.Info(fmt.Sprintf("Starting next ingestion step: %s", nextStep))
-		nextStep, ok = IngestionStep(nextStep).Next()
 		logger.Info(fmt.Sprintf("Finished ingestion step: %s", nextStep))
+
+		nextStep, ok = IngestionStep(nextStep).Next()
 		time.Sleep(ingestionSleepTime)
 	}
 	logger.Info(fmt.Sprintf("Ingestion completed successfully within %v", time.Since(startTimestamp)))
