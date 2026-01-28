@@ -8,18 +8,22 @@ import (
 
 func getNextIngestPeriod(db DBInterface, logger *Logger, defaultFromTime time.Time) (time.Time, time.Time, error) {
 	var lastSuccessLog IngestionLog
-	err := db.Get(&lastSuccessLog, "SELECT * FROM ingestion_logs l WHERE l.status = 'success' ORDER BY l.updated DESC LIMIT 1")
+	err := db.Get(&lastSuccessLog, "SELECT * FROM ingestion_logs WHERE status = 'success' ORDER BY updated DESC LIMIT 1")
 	if err == sql.ErrNoRows {
 		return defaultFromTime, time.Now(), nil
 	} else if err != nil {
-		logger.Error(fmt.Sprintf("Failed to query last success timestamp: %v", err))
+		logger.Error(fmt.Sprintf("Failed to query last ingestion log: %v", err))
 		t := time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC)
 		return t, t, nil
 	}
 
 	_, ok := lastSuccessLog.Step.Next()
-	if ok { //Ok means we found a next step, and are thus in the middle of an ingestion => Use same time perion
-		return lastSuccessLog.IngestFrom, lastSuccessLog.IngestTo, nil
+	if ok { //Ok means we found a next step, and are thus in the middle of an ingestion => Use same time perion, exept if the step before started before the default time (should be only the case for the first person ingestion)
+		if lastSuccessLog.IngestFrom.After(defaultFromTime) {
+			return lastSuccessLog.IngestFrom, lastSuccessLog.IngestTo, nil
+		} else {
+			return defaultFromTime, lastSuccessLog.IngestTo, nil
+		}
 	}
 	return lastSuccessLog.IngestTo, time.Now(), nil //Start where we left off
 }
@@ -30,9 +34,9 @@ func setRole(db DBInterface, personID string, name string, lastName string, firs
 	err := db.Get(&exists, `
 		SELECT EXISTS(
 			SELECT 1 FROM roles 
-			WHERE person_id = $1 AND election_period = $2 AND name = $3 AND name_suffix = $4
+			WHERE person_id = $1 AND election_period = $2 AND name = $3 AND first_name = $4 AND name_suffix = $5 AND last_name = $6
 		)
-	`, personID, electionPeriod, name, nameSuffix)
+	`, personID, electionPeriod, name, firstName, nameSuffix, lastName)
 	if err != nil {
 		return fmt.Errorf("check role existence: %w", err)
 	}

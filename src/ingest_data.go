@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -112,6 +113,40 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 	return nil
 }
 
+func getElectionPeriodsForNewestRole(mainElectionPeriods []int32, roleElectionPeriods []int32) []int32 {
+	var result []int32
+	var maxPeriod int32 = -1
+	for _, period := range mainElectionPeriods {
+		if period > maxPeriod {
+			maxPeriod = period
+		}
+		if !slices.Contains(roleElectionPeriods, period) {
+			result = append(result, period)
+		}
+	}
+	if maxPeriod != -1 && !slices.Contains(result, maxPeriod) {
+		result = append(result, maxPeriod)
+	}
+	return result
+}
+
+func getRoleElectionPeriods(roles *[]dip.PersonRole) []int32 {
+	var result []int32
+	if roles == nil {
+		return result
+	}
+	for _, role := range *roles {
+		if role.WahlperiodeNummer != nil && len(*role.WahlperiodeNummer) > 0 {
+			for _, period := range *role.WahlperiodeNummer {
+				if !slices.Contains(result, period) {
+					result = append(result, period)
+				}
+			}
+		}
+	}
+	return result
+}
+
 func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
 	for _, p := range persons {
 		_, err := db.Exec("INSERT INTO persons (id, api_updated) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET api_updated = $2", p.Id, p.Aktualisiert)
@@ -145,6 +180,8 @@ func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error 
 		} else {
 			logger.Warn(fmt.Sprintf("person %s has no Wahlperiode, using -1", p.Id))
 		}
+
+		wahlperioden = getElectionPeriodsForNewestRole(wahlperioden, getRoleElectionPeriods(p.PersonRoles))
 
 		for _, wp := range wahlperioden {
 			electionPeriod, err := getOrSetElectionPeriod(db, int(wp), logger)
@@ -312,6 +349,11 @@ func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp t
 
 func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, logger *Logger) error {
 	for _, p := range printedPapers {
+		if p.Wahlperiode == nil {
+			logger.Warn(fmt.Sprintf("printed paper %s has no Wahlperiode, skipping", p.Id))
+			continue
+		}
+
 		electionPeriod, err := getOrSetElectionPeriod(db, int(*p.Wahlperiode), logger)
 		if err != nil {
 			return fmt.Errorf("error getting/setting election period for protocol %s: %w", p.Id, err)
@@ -661,7 +703,11 @@ func clearDB(db *sqlx.DB, logger *Logger) error {
 func updateRequestTimeout(db *sqlx.DB, logger *Logger) error {
 	var status IngestionStatus
 	err := db.Get(&status, "SELECT status FROM ingestion_logs ORDER BY updated DESC LIMIT 1")
-	if err != nil {
+	if err == sql.ErrNoRows {
+		logger.Info("No ingestion logs found, resetting request timeout to default")
+		requestTimeout = defaultRequestTimeout
+		return nil
+	} else if err != nil {
 		return fmt.Errorf("failed to get last ingestion status: %w", err)
 	}
 	if status == IngestionStatusSuccess {
@@ -751,6 +797,7 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 	}
 
 	if reinitialize {
+		logger.Info("Clearing database")
 		err := clearDB(db, logger)
 		if err != nil {
 			logger.Error(fmt.Sprintf("failed to clear database: %v", err))
@@ -791,20 +838,21 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 
 	var startTimestamp = time.Now().UTC()
 
-	fromPersons, toPersons, err := getNextIngestPeriod(db, logger, time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC))
+	fromPersons, to, err := getNextIngestPeriod(db, logger, time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		logger.Error(fmt.Sprintf("failed to get next ingest period for persons: %v", err))
 		return fmt.Errorf("failed to get next ingest period for persons: %w", err)
 	}
-	from, to, err := getNextIngestPeriod(db, logger, initializeNewerThan)
+	from, _, err := getNextIngestPeriod(db, logger, initializeNewerThan)
 	if err != nil {
 		logger.Error(fmt.Sprintf("failed to get next ingest period: %v", err))
 		return fmt.Errorf("failed to get next ingest period: %w", err)
 	}
+	logger.Info(fmt.Sprintf("Ingesting persons from %s to %s and all other steps from %s to %s", fromPersons, to, from, to))
 
 	for ok {
 		if nextStep == IngestionStepPersons {
-			err = ingestStep(*client, nextStep, stepMap[nextStep], fromPersons, toPersons, db, logger)
+			err = ingestStep(*client, nextStep, stepMap[nextStep], fromPersons, to, db, logger)
 		} else {
 			err = ingestStep(*client, nextStep, stepMap[nextStep], from, to, db, logger)
 		}
@@ -813,11 +861,11 @@ func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) e
 			return fmt.Errorf("ingestion step %s failed: %w", nextStep, err)
 		}
 
+		logger.Info(fmt.Sprintf("Starting next ingestion step: %s", nextStep))
 		nextStep, ok = IngestionStep(nextStep).Next()
-
+		logger.Info(fmt.Sprintf("Finished ingestion step: %s", nextStep))
 		time.Sleep(ingestionSleepTime)
 	}
-
 	logger.Info(fmt.Sprintf("Ingestion completed successfully within %v", time.Since(startTimestamp)))
 	return nil
 }

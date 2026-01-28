@@ -155,6 +155,7 @@ func main() {
 			fmt.Fprint(w, "Failed to parse reinitializeStartDate", err)
 			return
 		}
+		logger.Info(fmt.Sprintf("Reinitializing ingestion from %s", reinitializeStartDate))
 
 		err = ingestData(db, reinitializeStartDate, true)
 		if err != nil {

@@ -40,13 +40,9 @@ func TestPersonRolesForBodoRamelow(t *testing.T) {
 		{"Bundestagsvizepräs.", 21, false},
 		{"MdBR", 20, false},
 		{"Bundesratspräs.", 20, false},
-		{"Bundestagsvizepräs.", 20, false},
 		{"Amt. Präs.", 19, false},
-		{"Bundestagsvizepräs.", 19, false},
 		{"MdBR", 19, false},
-		{"Bundestagsvizepräs.", 18, false},
 		{"MdBR", 18, false},
-		{"Bundestagsvizepräs.", 16, false},
 		{"MdB", 16, true},
 	}
 
@@ -54,33 +50,47 @@ func TestPersonRolesForBodoRamelow(t *testing.T) {
 		t.Errorf("Expected %d roles, got %d", len(expectedRoles), len(roles))
 	}
 
-	for i, expected := range expectedRoles {
-		if i >= len(roles) {
-			t.Errorf("Missing role at index %d: expected %s (period %d)", i, expected.Name, expected.ElectionPeriod)
-			continue
-		}
+	// Compare roles and expectedRoles as unordered sets
 
-		role := roles[i]
-
-		if role.RoleName.String != expected.Name {
-			t.Errorf("Role %d: expected name %q, got %q", i, expected.Name, role.RoleName.String)
-		}
-
-		if !role.ElectionPeriod.Valid || int(role.ElectionPeriod.Int64) != expected.ElectionPeriod {
-			t.Errorf("Role %d: expected election period %d, got %d", i, expected.ElectionPeriod, role.ElectionPeriod.Int64)
-		}
-
+	// Create maps to count and conveniently find expected and actual roles
+	type roleKey struct {
+		Name           string
+		ElectionPeriod int
+		HasGroup       bool
+	}
+	expectedRoleMap := make(map[roleKey]struct{})
+	for _, expected := range expectedRoles {
+		expectedRoleMap[roleKey{expected.Name, expected.ElectionPeriod, expected.HasGroup}] = struct{}{}
+	}
+	actualRoleMap := make(map[roleKey]struct{})
+	for _, role := range roles {
 		hasGroup := role.GroupID.Valid && role.GroupID.Int64 != 0
-		if hasGroup != expected.HasGroup {
-			t.Errorf("Role %d: expected hasGroup=%v, got hasGroup=%v (groupID=%d)", i, expected.HasGroup, hasGroup, role.GroupID.Int64)
+		k := roleKey{
+			Name:           role.RoleName.String,
+			ElectionPeriod: int(role.ElectionPeriod.Int64),
+			HasGroup:       hasGroup,
 		}
+		actualRoleMap[k] = struct{}{}
 
+		// Still validate the names for every role (should all match)
 		if role.LastName != "Ramelow" {
-			t.Errorf("Role %d: expected last name 'Ramelow', got %q", i, role.LastName)
+			t.Errorf("For role %+v: expected last name 'Ramelow', got %q", k, role.LastName)
 		}
-
 		if role.FirstName != "Bodo" {
-			t.Errorf("Role %d: expected first name 'Bodo', got %q", i, role.FirstName)
+			t.Errorf("For role %+v: expected first name 'Bodo', got %q", k, role.FirstName)
+		}
+	}
+
+	// Report any missing roles
+	for rk := range expectedRoleMap {
+		if _, found := actualRoleMap[rk]; !found {
+			t.Errorf("Missing expected role: %+v", rk)
+		}
+	}
+	// Report any unexpected roles
+	for rk := range actualRoleMap {
+		if _, found := expectedRoleMap[rk]; !found {
+			t.Errorf("Unexpected role found in DB: %+v", rk)
 		}
 	}
 }
