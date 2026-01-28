@@ -59,6 +59,19 @@ func initIngestionWorker() {
 	})
 }
 
+func heartbeatWorker(db *sqlx.DB, logger *Logger) {
+	for {
+		_, err := db.Exec("UPDATE ingestion_lock SET heartbeat = CURRENT_TIMESTAMP WHERE id = 1")
+		if err != nil {
+			logger.Fatal(fmt.Sprintf("heartbeat update failed: %v", err))
+		} else {
+			logger.Debug("heartbeat update succeeded")
+		}
+
+		time.Sleep(1 * time.Minute)
+	}
+}
+
 func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Time, currentTimestamp time.Time, db DBInterface, logger *Logger) error {
 	logger.Debug("Ingesting persons")
 	var count = 0
@@ -866,13 +879,14 @@ func ingestStep(client dip.ClientWithResponses, step IngestionStep, stepFunc Ing
 
 	if processingError != nil {
 		logger.Error(fmt.Sprintf("processingError: %v", processingError))
+		logIngestionError(processingError, logId)
 		return fmt.Errorf("processingError: %w", processingError)
 	}
 
 	_, err = tx.Exec("UPDATE ingestion_logs SET status = 'success', step=$1 , ingest_from = $2, ingest_to = $3 WHERE id = $4", step, from, to, logId)
 	if err != nil {
 		err = fmt.Errorf("failed to update ingestion log to success: %w", err)
-		logger.Error(err.Error())
+		logIngestionError(err, logId)
 		return err
 	}
 	logger.Info(fmt.Sprintf("All %s ingestion tasks completed, committing transaction...", step))

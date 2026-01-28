@@ -74,7 +74,50 @@ func buildDatabaseURL() (string, error) {
 	return databaseURL, nil
 }
 
+func tryAcquireIngestionLock(db *sqlx.DB, logger *Logger) (bool, error) {
+	logger.Debug("Trying to acquire ingestion lock")
+	startTime := time.Now()
+	result, err := db.Exec(`
+		UPDATE ingestion_lock
+		SET locked = TRUE, heartbeat = CURRENT_TIMESTAMP
+		WHERE id = 1
+			AND (locked = FALSE OR heartbeat < (CURRENT_TIMESTAMP - INTERVAL '3 minutes'))
+	`)
+	logger.Debug(fmt.Sprintf("Ingestion lock acquisition query took %v", time.Since(startTime)))
+	if err != nil {
+		return false, fmt.Errorf("failed to run ingestion lock acquisition query: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to check rows affected for ingestion lock: %w", err)
+	}
+	if rowsAffected == 0 {
+		logger.Info("Another instance is already running ingestion.")
+		return false, nil
+	}
+
+	return true, nil
+}
+
 func runIngestionLoop(db *sqlx.DB, logger *Logger) {
+	for {
+		acquired, err := tryAcquireIngestionLock(db, logger)
+		if err != nil {
+			logger.Fatal(fmt.Sprintf("Failed to try to acquire ingestion lock: %v", err))
+		}
+
+		if acquired {
+			break
+		}
+
+		time.Sleep(1 * time.Minute)
+	}
+
+	logger.Info("Ingestion lock acquired successfully.")
+
+	go heartbeatWorker(db, logger)
+
 	for {
 		if !ingestionWorkerRunning {
 			time.Sleep(1 * time.Second)

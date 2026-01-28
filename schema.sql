@@ -213,6 +213,15 @@ CREATE TABLE logs
     message   TEXT       NOT NULL
 );
 
+CREATE TABLE ingestion_lock
+(
+    id        SERIAL PRIMARY KEY,
+    locked    BOOLEAN    NOT NULL,
+    heartbeat TIMESTAMP NOT NULL
+);
+
+INSERT INTO ingestion_lock (locked, heartbeat) VALUES (FALSE, '1900-01-01 00:00:00');
+
 -- Trigger function to automatically set created and updated timestamps
 CREATE OR REPLACE FUNCTION set_timestamps()
     RETURNS TRIGGER AS

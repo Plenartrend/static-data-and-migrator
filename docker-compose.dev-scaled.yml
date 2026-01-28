@@ -1,0 +1,65 @@
+services:
+
+  server-1:
+    build:
+      dockerfile: dockerfile.dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./:/app/
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - plenartrend_network
+
+  server-2:
+    build:
+      dockerfile: dockerfile.dev
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./:/app/
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - plenartrend_network
+
+  server-3:
+    build:
+      dockerfile: dockerfile.dev
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./:/app/
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - plenartrend_network
+
+  server-4:
+    build:
+      dockerfile: dockerfile.dev
+    ports:
+      - "8083:8080"
+    volumes:
+      - ./:/app/
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - plenartrend_network
+
+  server-5:
+    build:
+      dockerfile: dockerfile.dev
+    ports:
+      - "8084:8080"
+    volumes:
+      - ./:/app/
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - plenartrend_network
+
+networks:
+  plenartrend_network:
+    name: plenartrend_network
