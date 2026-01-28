@@ -25,7 +25,10 @@ func getNextIngestPeriod(db DBInterface, logger *Logger, defaultFromTime time.Ti
 			return defaultFromTime, lastSuccessLog.IngestTo, nil
 		}
 	}
-	return lastSuccessLog.IngestTo, time.Now(), nil //Start where we left off
+
+	// Start where we left off, except go back 15 minutes to be safe.
+	// See https://dip.bundestag.de/documents/informationsblatt_zur_dip_api.pdf at section 2.6 "Anfrage kürzlich aktualisierter Entitäten".
+	return lastSuccessLog.IngestTo.Add(-15 * time.Minute), time.Now(), nil
 }
 
 // setRole sets a role in the database and logs a warning if it already exists. This happens because of low quality data in the API.
