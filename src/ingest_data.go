@@ -149,7 +149,12 @@ func getRoleElectionPeriods(roles *[]dip.PersonRole) []int32 {
 
 func processPersons(db DBInterface, persons []dip.Person, logger *Logger) error {
 	for _, p := range persons {
-		_, err := db.Exec("INSERT INTO persons (id, api_updated) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET api_updated = $2", p.Id, p.Aktualisiert)
+		_, err := db.Exec(`
+			INSERT INTO persons
+			(id, api_updated)
+			VALUES ($1, $2)
+			ON CONFLICT (id) DO NOTHING
+		`, p.Id, p.Aktualisiert)
 		if err != nil {
 			return fmt.Errorf("insert person %s: %w", p.Id, err)
 		}
@@ -287,18 +292,37 @@ func processProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logge
 			electionPeriod = sql.NullInt32{Int32: int32(ep), Valid: true}
 		}
 
-		_, err := db.Exec(`
-			INSERT INTO protocols
-			(id, title, document_number, publisher, session_note, url, text, election_period, date, api_updated)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			ON CONFLICT (id) DO UPDATE SET
-				title = $2, document_number = $3, publisher = $4, session_note = $5, url = $6, text = $7, election_period = $8, date = $9,
-				api_updated = $10
-		`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
-			p.Aktualisiert)
+		exists := true
+
+		var existingProtocol Protocol
+		err := db.Get(&existingProtocol, "SELECT * FROM protocols WHERE id = $1", p.Id)
+
+		if err == sql.ErrNoRows {
+			exists = false
+		} else if err != nil {
+			return fmt.Errorf("check protocol existence: %w", err)
+		}
+
+		if exists {
+			if len(existingProtocol.Text) <= 1000 {
+				_, err = db.Exec(`
+					UPDATE protocols SET
+						text = $2,
+						api_updated = $3
+					WHERE id = $1
+				`, p.Id, sanitizeStringPtr(p.Text), p.Aktualisiert)
+			}
+		} else {
+			_, err = db.Exec(`
+				INSERT INTO protocols
+				(id, title, document_number, publisher, session_note, url, text, election_period, date, api_updated)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			`, p.Id, p.Titel, p.Dokumentnummer, publisher, p.Sitzungsbemerkung, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
+				p.Aktualisiert)
+		}
 
 		if err != nil {
-			return fmt.Errorf("failed to insert protocol %s: %w", p.Id, err)
+			return fmt.Errorf("failed to insert or update protocol %s: %w", p.Id, err)
 		}
 	}
 
@@ -373,18 +397,38 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 			groupId = &gid
 		}
 
-		_, err = db.Exec(`
-			INSERT INTO printed_papers
-			(id, type, title, document_number, publisher, group_id, url, text, election_period, date, api_updated)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-			ON CONFLICT (id) DO UPDATE SET
-				type = $2, title = $3, document_number = $4, publisher = $5, group_id = $6, url = $7, text = $8, election_period = $9, date = $10,
-				api_updated = $11
-		`, p.Id, p.Drucksachetyp, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
-			p.Aktualisiert)
+		exists := true
+
+		var existingPrintedPaper PrintedPaper
+		err = db.Get(&existingPrintedPaper, "SELECT * FROM printed_papers WHERE id = $1", p.Id)
+
+		if err == sql.ErrNoRows {
+			exists = false
+		} else if err != nil {
+			return fmt.Errorf("check printed paper existence: %w", err)
+		}
+
+		if exists {
+			if len(existingPrintedPaper.Text) <= 1000 {
+				_, err = db.Exec(`
+					UPDATE printed_papers SET
+						text = $2,
+						api_updated = $3
+					WHERE id = $1
+				`, p.Id, sanitizeStringPtr(p.Text), p.Aktualisiert)
+			}
+			continue
+		} else {
+			_, err = db.Exec(`
+				INSERT INTO printed_papers
+				(id, type, title, document_number, publisher, group_id, url, text, election_period, date, api_updated)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			`, p.Id, p.Drucksachetyp, p.Titel, p.Dokumentnummer, p.Herausgeber, groupId, p.Fundstelle.PdfUrl, sanitizeStringPtr(p.Text), electionPeriod, p.Datum.Time,
+				p.Aktualisiert)
+		}
 
 		if err != nil {
-			return fmt.Errorf("failed to insert printed paper %s: %w", p.Id, err)
+			return fmt.Errorf("failed to insert or update printed paper %s: %w", p.Id, err)
 		}
 	}
 
@@ -478,14 +522,13 @@ func processActivities(activities []dip.Aktivitaet, db DBInterface, logger *Logg
 			protocolId = sql.NullInt32{Int32: pId, Valid: true}
 		}
 
-		var text string = "" // TODO what is the text of the activity?
+		var text string = "" // Will be added during processing of protocols/printed papers
 
 		_, err = db.Exec(`
 			INSERT INTO activities
 			(id, type, role_id, document_type, printed_paper_id, protocol_id, text, api_updated)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT (id) DO UPDATE SET
-				type = $2, role_id = $3, document_type = $4, printed_paper_id = $5, protocol_id = $6, text = $7, api_updated = $8
+			ON CONFLICT (id) DO NOTHING
 		`, a.Id, a.Aktivitaetsart, roleId, documentType, printedPaperId, protocolId, text, a.Aktualisiert)
 
 		if err != nil {
@@ -550,9 +593,12 @@ func processProcesses(processes []dip.Vorgang, db DBInterface, logger *Logger) e
 		if p.Datum != nil {
 			date = sql.NullTime{Time: p.Datum.Time, Valid: true}
 		}
-		_, err = db.Exec("INSERT INTO processes (id, title, status, summary, keywords, election_period, type, date, api_updated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"+
-			" ON CONFLICT (id) DO UPDATE SET title = $2, status = $3, summary = $4, keywords = $5, election_period = $6, type = $7, date = $8, api_updated = $9",
-			p.Id, p.Titel, p.Beratungsstand, p.Abstract, keywords, electionPeriod, p.Vorgangstyp, date, p.Aktualisiert)
+		_, err = db.Exec(`
+			INSERT INTO processes
+			(id, title, status, summary, keywords, election_period, type, date, api_updated)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (id) DO NOTHING
+		`, p.Id, p.Titel, p.Beratungsstand, p.Abstract, keywords, electionPeriod, p.Vorgangstyp, date, p.Aktualisiert)
 		if err != nil {
 			return fmt.Errorf("failed to insert process %s: %w", p.Id, err)
 		}
@@ -564,7 +610,12 @@ func processProcesses(processes []dip.Vorgang, db DBInterface, logger *Logger) e
 			if err != nil {
 				return fmt.Errorf("failed to get or set group for process %s: %w", p.Id, err)
 			}
-			_, err = db.Exec("INSERT INTO process_initiators (process_id, group_id) VALUES ($1, $2) ON CONFLICT (process_id, group_id) DO NOTHING", p.Id, groupId)
+			_, err = db.Exec(`
+				INSERT INTO process_initiators
+				(process_id, group_id)
+				VALUES ($1, $2)
+				ON CONFLICT (process_id, group_id) DO NOTHING
+			`, p.Id, groupId)
 			if err != nil {
 				return fmt.Errorf("failed to insert process initiator for process %s: %w", p.Id, err)
 			}
@@ -656,10 +707,12 @@ func processProcessPositions(processPositions []dip.Vorgangsposition, db DBInter
 			continue
 		}
 
-		_, err = db.Exec("INSERT INTO process_positions (id, type, process_id, printed_paper_id, protocol_id, association, continuation, supplement, title, document_type, date, api_updated) "+
-			"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) "+
-			"ON CONFLICT (id) DO UPDATE SET type = $2, process_id = $3, printed_paper_id = $4, protocol_id = $5, association = $6, continuation = $7, supplement = $8, title = $9, document_type = $10, date = $11, api_updated = $12",
-			p.Id, p.Vorgangstyp, p.VorgangId, printedPaperId, protocolId, p.Zuordnung, p.Fortsetzung, p.Nachtrag, p.Titel, documentType, p.Datum.Time, p.Aktualisiert)
+		_, err = db.Exec(`
+			INSERT INTO process_positions
+			(id, type, process_id, printed_paper_id, protocol_id, association, continuation, supplement, title, document_type, date, api_updated)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			ON CONFLICT (id) DO NOTHING
+		`, p.Id, p.Vorgangstyp, p.VorgangId, printedPaperId, protocolId, p.Zuordnung, p.Fortsetzung, p.Nachtrag, p.Titel, documentType, p.Datum.Time, p.Aktualisiert)
 		if err != nil {
 			// Check for foreign key violation (PostgreSQL code "23503")
 			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23503" {
