@@ -142,27 +142,41 @@ func runIngestionLoop(db *sqlx.DB, logger *Logger) {
 func main() {
 	_ = godotenv.Load() // Do not fail if .env is missing, as we set the environment variables directly in production
 
+	log.Println("static-data-and-migrator starting up")
+
+	var err error
+	logLevel, err = GetLogLevel(os.Getenv("LOG_LEVEL"))
+	if err != nil {
+		log.Fatalf("Failed to get log level (LOG_LEVEL=%q): %v", os.Getenv("LOG_LEVEL"), err)
+	}
+
 	databaseURL, err := buildDatabaseURL()
 	if err != nil {
 		log.Fatalf("Database configuration error: %v", err)
 	}
 
 	var db *sqlx.DB
+	attempt := 0
 	for true {
+		attempt++
 		db, err = sqlx.Connect("postgres", databaseURL)
 		if err == nil {
 			defer db.Close()
 			break
 		}
-		log.Printf("Failed to connect to database: %v", err)
+		log.Printf(
+			"Failed to connect to database (attempt=%d host=%q port=%q db=%q sslmode=%q): %v",
+			attempt,
+			os.Getenv("DATABASE_HOST"),
+			os.Getenv("DATABASE_PORT"),
+			os.Getenv("DATABASE_NAME"),
+			os.Getenv("DATABASE_SSLMODE"),
+			err,
+		)
 		time.Sleep(time.Second)
 	}
 
 	initIngestionWorker()
-	logLevel, err = GetLogLevel(os.Getenv("LOG_LEVEL"))
-	if err != nil {
-		log.Fatalf("Failed to get log level: %v", err)
-	}
 	logger := NewLogger(db, &logLevel, &logLevel, serviceLogPrefix)
 
 	INGEST_ACTIVITIES_START_DATE, err = getDateOrDefault(os.Getenv("INGEST_ACTIVITIES_START_DATE"), INGEST_ACTIVITIES_START_DATE)
@@ -170,17 +184,33 @@ func main() {
 		logger.Error(fmt.Sprintf("failed to parse INGEST_ACTIVITIES_START_DATE: %v", err))
 		return
 	}
+	logger.Debug(fmt.Sprintf("INGEST_ACTIVITIES_START_DATE=%s", INGEST_ACTIVITIES_START_DATE.Format(time.RFC3339)))
 
+	ingestionIntervalSource := "default"
 	if sleepEnv := os.Getenv("INGESTION_INTERVAL_MINUTES"); sleepEnv != "" {
 		if minutes, err := strconv.Atoi(sleepEnv); err == nil {
 			INGESTION_SLEEP_DURATION = time.Duration(minutes) * time.Minute
+			ingestionIntervalSource = "env"
 		} else {
 			logger.Error(fmt.Sprintf("failed to parse INGESTION_INTERVAL_MINUTES: %v", err))
 			return
 		}
 	}
+	logger.Debug(fmt.Sprintf("INGESTION_SLEEP_DURATION=%s", INGESTION_SLEEP_DURATION))
 
-	ingestionWorkerRunning = os.Getenv("BEGIN_INGESTION_ON_STARTUP") == "true"
+	ingestionWorkerRunning, err = strconv.ParseBool(os.Getenv("BEGIN_INGESTION_ON_STARTUP"))
+	if err != nil {
+		logger.Error(fmt.Sprintf("failed to parse BEGIN_INGESTION_ON_STARTUP: %v", err))
+		return
+	}
+
+	logger.Info(fmt.Sprintf(
+		"Startup config: INGEST_ACTIVITIES_START_DATE=%s INGESTION_SLEEP_DURATION=%s (source=%s) BEGIN_INGESTION_ON_STARTUP=%t",
+		INGEST_ACTIVITIES_START_DATE.Format(time.RFC3339),
+		INGESTION_SLEEP_DURATION,
+		ingestionIntervalSource,
+		ingestionWorkerRunning,
+	))
 
 	go runIngestionLoop(db, logger)
 
@@ -216,6 +246,8 @@ func main() {
 		fmt.Fprint(w, "Data ingested successfully")
 	})
 
-	log.Println("Server starting on :8080")
-	http.ListenAndServe(":8080", nil)
+	logger.Info("HTTP server starting on :8080 (endpoints: /health, /control-ingestion, /reinitialize)")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		logger.Fatal(fmt.Sprintf("HTTP server stopped unexpectedly: %v", err))
+	}
 }
