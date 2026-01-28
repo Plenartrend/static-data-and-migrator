@@ -86,12 +86,13 @@ func runIngestionLoop(db *sqlx.DB, logger *Logger) {
 		err := ingestData(db, INGEST_ACTIVITIES_START_DATE, false)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to ingest data: %v", err))
+			logger.Info(fmt.Sprintf("Sleeping for 60 minutes before next ingestion cycle, as we expect the error to have been a rate limit error"))
+			time.Sleep(time.Minute * 60)
 		} else {
 			logger.Info("Ingestion cycle completed successfully")
+			logger.Info(fmt.Sprintf("Sleeping for %v before next ingestion cycle", INGESTION_SLEEP_DURATION))
+			time.Sleep(INGESTION_SLEEP_DURATION)
 		}
-
-		logger.Info(fmt.Sprintf("Sleeping for %v before next ingestion cycle", INGESTION_SLEEP_DURATION))
-		time.Sleep(INGESTION_SLEEP_DURATION)
 	}
 }
 

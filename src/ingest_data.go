@@ -35,6 +35,7 @@ type IngestionStepFunc func(*dip.ClientWithResponses, time.Time, time.Time, DBIn
 var ingestionWG sync.WaitGroup
 var ingestionsTasks = make(chan func())
 var workerOnce sync.Once
+var processingError error
 
 func initIngestionWorker() {
 	workerOnce.Do(func() {
@@ -51,8 +52,6 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 	logger.Debug("Ingesting persons")
 	var count = 0
 	var cursor *string
-	var processingErr error
-	var errMutex sync.Mutex
 
 	for {
 		beforePersonrequestTimestamp := time.Now().UTC()
@@ -69,14 +68,6 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 			return fmt.Errorf("unexpected response status: %d", resp.StatusCode())
 		}
 
-		// Check if processing has already failed before queuing more tasks
-		errMutex.Lock()
-		if processingErr != nil {
-			errMutex.Unlock()
-			return fmt.Errorf("processing failed: %w", processingErr)
-		}
-		errMutex.Unlock()
-
 		// Capture documents in closure for parallel ingestion
 		documents := resp.JSON200.Documents
 
@@ -89,11 +80,9 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 			err := processPersons(db, documents, logger)
 			if err != nil {
 				logger.Error(fmt.Sprintf("failed to process persons: %v", err))
-				errMutex.Lock()
-				if processingErr == nil {
-					processingErr = err
+				if processingError == nil {
+					processingError = err
 				}
-				errMutex.Unlock()
 			}
 		}
 
@@ -102,13 +91,6 @@ func ingestPersons(client *dip.ClientWithResponses, lastSuccessTimestamp time.Ti
 		logger.Debug(fmt.Sprintf("Got %d persons with cursor %s from total %d", count, *cursor, resp.JSON200.NumFound))
 		time.Sleep(requestTimeout)
 	}
-
-	errMutex.Lock()
-	if processingErr != nil {
-		errMutex.Unlock()
-		return fmt.Errorf("processing failed: %w", processingErr)
-	}
-	errMutex.Unlock()
 
 	return nil
 }
@@ -263,6 +245,9 @@ func ingestProtocols(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 			err := processProtocols(documents, db, logger)
 			if err != nil {
 				logger.Error(fmt.Sprintf("failed to process protocols: %v", err))
+				if processingError == nil {
+					processingError = err
+				}
 			}
 		}
 
@@ -359,6 +344,9 @@ func ingestPrintedPapers(client *dip.ClientWithResponses, lastSuccessTimestamp t
 			err := processPrintedPapers(documents, db, logger)
 			if err != nil {
 				logger.Error(fmt.Sprintf("failed to process printed papers: %v", err))
+				if processingError == nil {
+					processingError = err
+				}
 			}
 		}
 
@@ -465,6 +453,9 @@ func ingestActivities(client *dip.ClientWithResponses, lastSuccessTimestamp time
 			err := processActivities(documents, db, logger)
 			if err != nil {
 				logger.Error(fmt.Sprintf("failed to process activities: %v", err))
+				if processingError == nil {
+					processingError = err
+				}
 			}
 		}
 
@@ -568,7 +559,10 @@ func ingestProcesses(client *dip.ClientWithResponses, lastSuccessTimestamp time.
 		ingestionsTasks <- func() {
 			err := processProcesses(documents, db, logger)
 			if err != nil {
-				logger.Fatal(fmt.Sprintf("failed to process processes: %v", err))
+				logger.Error(fmt.Sprintf("failed to process processes: %v", err))
+				if processingError == nil {
+					processingError = err
+				}
 			}
 		}
 		count += len(documents)
@@ -653,7 +647,10 @@ func ingestProcessPositions(client *dip.ClientWithResponses, lastSuccessTimestam
 		ingestionsTasks <- func() {
 			err := processProcessPositions(documents, db, logger)
 			if err != nil {
-				logger.Fatal(fmt.Sprintf("failed to process process positions: %v", err))
+				logger.Error(fmt.Sprintf("failed to process process positions: %v", err))
+				if processingError == nil {
+					processingError = err
+				}
 			}
 		}
 		count += len(documents)
@@ -814,6 +811,11 @@ func ingestStep(client dip.ClientWithResponses, step IngestionStep, stepFunc Ing
 	logger.Debug(fmt.Sprintf("Waiting for all %s ingestion tasks to complete...", step))
 	ingestionWG.Wait()
 
+	if processingError != nil {
+		logger.Error(fmt.Sprintf("processingError: %v", processingError))
+		return fmt.Errorf("processingError: %w", processingError)
+	}
+
 	_, err = tx.Exec("UPDATE ingestion_logs SET status = 'success', step=$1 , ingest_from = $2, ingest_to = $3 WHERE id = $4", step, from, to, logId)
 	if err != nil {
 		err = fmt.Errorf("failed to update ingestion log to success: %w", err)
@@ -821,6 +823,7 @@ func ingestStep(client dip.ClientWithResponses, step IngestionStep, stepFunc Ing
 		return err
 	}
 	logger.Info(fmt.Sprintf("All %s ingestion tasks completed, committing transaction...", step))
+
 	if err = tx.Commit(); err != nil {
 		err = fmt.Errorf("failed to commit transaction for %s: %w", step, err)
 		logIngestionError(err, logId)
@@ -834,6 +837,7 @@ func ingestStep(client dip.ClientWithResponses, step IngestionStep, stepFunc Ing
 func ingestData(db *sqlx.DB, initializeNewerThan time.Time, reinitialize bool) error {
 	// Logger uses db connection (not transaction) so logs always commit even if transaction rolls back
 	logger := NewLogger(db, &logLevel, &logLevel, serviceLogPrefix)
+	processingError = nil
 
 	var lastStep IngestionStep
 	err := db.Get(&lastStep, "SELECT step FROM ingestion_logs WHERE status = 'success' ORDER BY updated DESC LIMIT 1")
