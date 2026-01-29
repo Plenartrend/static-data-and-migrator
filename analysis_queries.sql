@@ -6,7 +6,7 @@ WITH protocol_ratios AS (
     FROM protocols p
              JOIN activities a ON a.protocol_id = p.id
     WHERE p.processing_status = 'completed'
-      AND a.type = 'Rede'
+      AND a.type like 'Rede%'
     GROUP BY p.id
 )
 SELECT AVG(empty_ratio) AS avg_empty_ratio
@@ -20,7 +20,7 @@ SELECT
 FROM protocols p
          JOIN activities a ON a.protocol_id = p.id
 WHERE p.processing_status = 'completed'
-  AND a.type = 'Rede'
+  AND a.type like 'Rede%'
 GROUP BY p.id
 HAVING COUNT(*) FILTER (WHERE a.text = '')::float / COUNT(*)::float > 0.25
 ORDER BY unassigned_rate DESC;
@@ -34,5 +34,5 @@ SELECT
 FROM protocols p
          JOIN activities a ON a.protocol_id = p.id
 WHERE p.id = 5750
-  AND a.type = 'Rede'
+  AND a.type like 'Rede%'
 GROUP BY p.id;
