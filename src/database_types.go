@@ -81,19 +81,19 @@ type ProcessPosition struct {
 }
 
 type PrintedPaper struct {
-	ID             int           `db:"id" json:"id,omitempty"`
-	Type           string        `db:"type" json:"type,omitempty"`
-	Title          string        `db:"title" json:"title,omitempty"`
-	DocumentNumber string        `db:"document_number" json:"document_number,omitempty"`
-	Publisher      Body          `db:"publisher" json:"publisher,omitempty"`
-	GroupID        sql.NullInt64 `db:"group_id" json:"group_id,omitempty"`
-	URL            string        `db:"url" json:"url,omitempty"`
-	Text           string        `db:"text" json:"text,omitempty"`
-	ElectionPeriod int           `db:"election_period" json:"election_period,omitempty"`
-	Date           time.Time     `db:"date" json:"date,omitempty"`
-	APIUpdated     time.Time     `db:"api_updated" json:"api_updated,omitempty"`
-	Updated        time.Time     `db:"updated" json:"updated,omitempty"`
-	Created        time.Time     `db:"created" json:"created,omitempty"`
+	ID             int            `db:"id" json:"id,omitempty"`
+	Type           string         `db:"type" json:"type,omitempty"`
+	Title          string         `db:"title" json:"title,omitempty"`
+	DocumentNumber string         `db:"document_number" json:"document_number,omitempty"`
+	Publisher      Body           `db:"publisher" json:"publisher,omitempty"`
+	GroupID        sql.NullInt64  `db:"group_id" json:"group_id,omitempty"`
+	URL            string         `db:"url" json:"url,omitempty"`
+	Text           sql.NullString `db:"text" json:"text,omitempty"`
+	ElectionPeriod int            `db:"election_period" json:"election_period,omitempty"`
+	Date           time.Time      `db:"date" json:"date,omitempty"`
+	APIUpdated     time.Time      `db:"api_updated" json:"api_updated,omitempty"`
+	Updated        time.Time      `db:"updated" json:"updated,omitempty"`
+	Created        time.Time      `db:"created" json:"created,omitempty"`
 }
 
 type Protocol struct {
@@ -103,7 +103,7 @@ type Protocol struct {
 	Publisher           Body             `db:"publisher" json:"publisher,omitempty"`
 	SessionNote         sql.NullString   `db:"session_note" json:"session_note,omitempty"`
 	URL                 string           `db:"url" json:"url,omitempty"`
-	Text                string           `db:"text" json:"text,omitempty"`
+	Text                sql.NullString   `db:"text" json:"text,omitempty"`
 	ElectionPeriod      int              `db:"election_period" json:"election_period,omitempty"`
 	Date                time.Time        `db:"date" json:"date,omitempty"`
 	APIUpdated          time.Time        `db:"api_updated" json:"api_updated,omitempty"`

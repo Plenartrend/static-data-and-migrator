@@ -327,7 +327,7 @@ func processProtocols(protocols []dip.PlenarprotokollText, db DBInterface, logge
 		}
 
 		if exists {
-			if len(existingProtocol.Text) <= 1000 {
+			if len(existingProtocol.Text.String) <= 1000 {
 				_, err = db.Exec(`
 					UPDATE protocols SET
 						text = $2,
@@ -442,7 +442,7 @@ func processPrintedPapers(printedPapers []dip.DrucksacheText, db DBInterface, lo
 		}
 
 		if exists {
-			if len(existingPrintedPaper.Text) <= 1000 {
+			if len(existingPrintedPaper.Text.String) <= 1000 {
 				_, err = db.Exec(`
 					UPDATE printed_papers SET
 						text = $2,
