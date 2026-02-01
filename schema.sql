@@ -9,13 +9,23 @@ CREATE TYPE ingestion_status AS ENUM ('in_progress', 'success', 'failed');
 CREATE TYPE ingestion_step AS ENUM ('persons', 'protocols', 'printed_papers', 'processes', 'process_positions', 'activities');
 CREATE TYPE log_status AS ENUM ('debug', 'info', 'warn', 'error', 'fatal');
 
+-- Topic clusters table
+CREATE TABLE topic_clusters
+(
+    id      SERIAL PRIMARY KEY,
+    title   TEXT NOT NULL,
+    updated TIMESTAMP,
+    created TIMESTAMP
+);
+
 -- Topics table
 CREATE TABLE topics
 (
     id      SERIAL PRIMARY KEY,
     name    TEXT NOT NULL,
     updated TIMESTAMP,
-    created TIMESTAMP
+    created TIMESTAMP,
+    cluster_id INTEGER REFERENCES topic_clusters (id) ON DELETE SET NULL
 );
 
 -- Parliamentary groups (Fraktionen)
@@ -213,14 +223,16 @@ CREATE TABLE logs
     message   TEXT       NOT NULL
 );
 
-CREATE TABLE ingestion_lock
+CREATE TABLE locks
 (
     id        SERIAL PRIMARY KEY,
+    name      TEXT       NOT NULL,
     locked    BOOLEAN    NOT NULL,
-    heartbeat TIMESTAMP NOT NULL
+    heartbeat TIMESTAMP  NOT NULL
 );
 
-INSERT INTO ingestion_lock (locked, heartbeat) VALUES (FALSE, '1900-01-01 00:00:00');
+INSERT INTO locks (name, locked, heartbeat) VALUES ('ingest', FALSE, '1900-01-01 00:00:00');
+INSERT INTO locks (name, locked, heartbeat) VALUES ('topic-cluster', FALSE, '1900-01-01 00:00:00');
 
 -- Trigger function to automatically set created and updated timestamps
 CREATE OR REPLACE FUNCTION set_timestamps()
@@ -240,6 +252,12 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Apply triggers to all tables with created/updated columns
+CREATE TRIGGER set_timestamps_topic_clusters
+    BEFORE INSERT OR UPDATE
+    ON topic_clusters
+    FOR EACH ROW
+EXECUTE FUNCTION set_timestamps();
+
 CREATE TRIGGER set_timestamps_topics
     BEFORE INSERT OR UPDATE
     ON topics

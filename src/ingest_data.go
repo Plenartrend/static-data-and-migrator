@@ -61,7 +61,7 @@ func initIngestionWorker() {
 
 func heartbeatWorker(db *sqlx.DB, logger *Logger) {
 	for {
-		_, err := db.Exec("UPDATE ingestion_lock SET heartbeat = CURRENT_TIMESTAMP WHERE id = 1")
+		_, err := db.Exec("UPDATE locks SET heartbeat = CURRENT_TIMESTAMP WHERE name = 'ingest'")
 		if err != nil {
 			logger.Fatal(fmt.Sprintf("heartbeat update failed: %v", err))
 		} else {

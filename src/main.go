@@ -78,9 +78,9 @@ func tryAcquireIngestionLock(db *sqlx.DB, logger *Logger) (bool, error) {
 	logger.Debug("Trying to acquire ingestion lock")
 	startTime := time.Now()
 	result, err := db.Exec(`
-		UPDATE ingestion_lock
+		UPDATE locks
 		SET locked = TRUE, heartbeat = CURRENT_TIMESTAMP
-		WHERE id = 1
+		WHERE name = 'ingest'
 			AND (locked = FALSE OR heartbeat < (CURRENT_TIMESTAMP - INTERVAL '3 minutes'))
 	`)
 	logger.Debug(fmt.Sprintf("Ingestion lock acquisition query took %v", time.Since(startTime)))
