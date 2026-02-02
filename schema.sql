@@ -15,7 +15,8 @@ CREATE TABLE topic_clusters
     id      SERIAL PRIMARY KEY,
     title   TEXT NOT NULL,
     updated TIMESTAMP,
-    created TIMESTAMP
+    created TIMESTAMP,
+    embedding VECTOR(384)
 );
 
 -- Topics table
